@@ -34,6 +34,10 @@ test('CodexCliReviewRunner appends a locale-aware Chinese review prompt only for
     target: {
       type: 'custom',
       instructions: '只审查测试目录里的改动。',
+      focus: ['测试', '回归风险'],
+      includePaths: ['test/'],
+      excludePaths: ['docs/'],
+      outputLanguage: 'zh-CN',
     },
     locale: 'zh-CN',
   });
@@ -54,7 +58,7 @@ test('CodexCliReviewRunner appends a locale-aware Chinese review prompt only for
     '-c',
   ]);
   assert.ok(seenArgs[0]?.includes('review'));
-  assert.ok(seenArgs[0]?.includes('只审查测试目录里的改动。\n\n请使用简体中文输出代码审查结果。 先给出按严重程度排序的 findings，再补充说明。 如果没有明确问题，请明确写“未发现明确问题”。'));
+  assert.ok(seenArgs[0]?.includes('只审查测试目录里的改动。\n\nFocus areas:\n- 测试\n- 回归风险\n\nPrefer these paths:\n- test/\n\nAvoid these paths unless necessary:\n- docs/\n\n请使用简体中文输出代码审查结果。 先给出按严重程度排序的 findings，再补充说明。 如果没有明确问题，请明确写“未发现明确问题”。'));
 });
 
 test('CodexCliReviewRunner aborts before spawn when interrupted during onTurnStarted', async () => {

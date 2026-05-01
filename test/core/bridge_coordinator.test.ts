@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { resolveOpenAIAgentRuntimeConfig } from '../../src/core/bridge_coordinator.js';
+import {
+  resolveOpenAIAgentRuntimeConfig,
+  AGENT_COMMAND_SKILL_ACTIONS,
+  REVIEW_COMMAND_SKILL_ACTIONS,
+} from '../../src/core/bridge_coordinator.js';
 import { createCodexBridgeRuntime } from '../../src/runtime/bootstrap.js';
 
 class FakeProviderPlugin {
@@ -244,7 +248,9 @@ class FakeProviderPlugin {
         threadId: bridgeSession.codexThreadId,
       });
     }
-    const outputText = `${this.replyPrefix}: ${inputText}`;
+    const outputText = String(inputText ?? '').includes('CodexBridge review result localizer.')
+      ? '已按当前语言输出代码审查结果。'
+      : `${this.replyPrefix}: ${inputText}`;
     this.threads.set(bridgeSession.codexThreadId, {
       ...existingThread,
       updatedAt: this.nextUpdatedAt(),
@@ -5764,7 +5770,7 @@ test('/review runs a native review for uncommitted changes without rebinding the
   assert.equal(openai.startReviewCalls[0]?.bridgeSession?.codexThreadId, originalThreadId);
   assert.equal(result.session?.codexThreadId, originalThreadId);
   assert.match(result.messages[0]?.text ?? '', /代码审查 \| 未提交改动/);
-  assert.match(result.messages[0]?.text ?? '', /openai review: uncommitted/);
+  assert.match(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
 });
 
 test('/review base main targets base-branch review and can run without an existing session', async () => {
@@ -5786,7 +5792,7 @@ test('/review base main targets base-branch review and can run without an existi
   });
   assert.equal(result.session ?? null, null);
   assert.match(result.messages[0]?.text ?? '', /代码审查 \| 相对分支 main/);
-  assert.match(result.messages[0]?.text ?? '', /openai review: base main/);
+  assert.match(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
 });
 
 test('/review emits an immediate localized progress update before waiting for the native review result', async () => {
@@ -5835,6 +5841,29 @@ test('/review forwards the active session locale into the native review request'
   assert.equal(openai.startReviewCalls[0]?.locale, 'en');
 });
 
+test('/review keeps English native review text when locale is en', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-en-result-1',
+    text: '/lang en',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-en-result-1',
+    text: '/review base main',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.match(result.messages[0]?.text ?? '', /Code review \| Base branch main/);
+  assert.match(result.messages[0]?.text ?? '', /openai review: base main/);
+  assert.doesNotMatch(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
+});
+
 test('/review clears the active scope turn if the initial progress delivery fails', async () => {
   const { runtime, openai } = makeRuntime({
     defaultCwd: '/tmp/openai-default',
@@ -5857,6 +5886,109 @@ test('/review clears the active scope turn if the initial progress delivery fail
   assert.match(result.messages[0]?.text ?? '', /代码审查失败：preview send failed/);
   assert.equal(openai.startReviewCalls.length, 0);
   assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+});
+
+test('/review custom <instructions> targets the explicit custom review path without invoking the parser skill', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-custom-1',
+    text: '/review custom 只审查测试目录里的改动',
+  });
+
+  assert.equal(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('docs/command-skills/review.md')), false);
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.deepEqual(openai.startReviewCalls[0]?.target, {
+    type: 'custom',
+    instructions: '只审查测试目录里的改动',
+    outputLanguage: 'zh-CN',
+  });
+  assert.match(result.messages[0]?.text ?? '', /代码审查 \| 自定义目标/);
+  assert.match(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
+});
+
+test('/review natural language uses the review command skill and preserves structured custom options', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('docs/command-skills/review.md') && parserInput.includes('"command": "review"')) {
+      assert.match(parserInput, /"customOptions": \[/);
+      return {
+        outputText: JSON.stringify({
+          schemaVersion: 'codexbridge.review-command-skill.v1',
+          ok: true,
+          action: 'run_review',
+          confidence: 0.96,
+          requiresConfirmation: false,
+          target: {
+            type: 'custom',
+            instructions: '只审查 Agent 状态流转相关的改动，重点看回归风险。',
+            focus: ['状态流转', '回归风险'],
+            includePaths: ['src/core/bridge_coordinator.ts', 'test/core/bridge_coordinator.test.ts'],
+            excludePaths: ['docs/'],
+            outputLanguage: 'zh-CN',
+          },
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-natural-1',
+    text: '/review 重点看 Agent 状态流转相关改动的回归风险',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.deepEqual(openai.startReviewCalls[0]?.target, {
+    type: 'custom',
+    instructions: '只审查 Agent 状态流转相关的改动，重点看回归风险。',
+    focus: ['状态流转', '回归风险'],
+    includePaths: ['src/core/bridge_coordinator.ts', 'test/core/bridge_coordinator.test.ts'],
+    excludePaths: ['docs/'],
+    outputLanguage: 'zh-CN',
+  });
+  assert.match(result.messages[0]?.text ?? '', /代码审查 \| 自定义目标/);
+  assert.match(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
+});
+
+test('/review natural language can reject execution requests and avoids starting review', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('docs/command-skills/review.md') && parserInput.includes('"command": "review"')) {
+      return {
+        outputText: JSON.stringify({
+          schemaVersion: 'codexbridge.review-command-skill.v1',
+          ok: false,
+          action: 'reject',
+          confidence: 0.98,
+          requiresConfirmation: false,
+          reason: '这是执行或修复请求，不是只读审查。应该使用 /agent。',
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-reject-1',
+    text: '/review 顺手把发现的问题也修了',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 0);
+  assert.match(result.messages[0]?.text ?? '', /应该使用 \/agent/);
 });
 
 test('/agent drafts, confirms, runs, verifies, and records a background job', async () => {
@@ -5935,32 +6067,44 @@ test('/agent edit updates the pending agent draft instead of replacing it', asyn
     const originalStartTurn = openai.startTurn.bind(openai);
     openai.startTurn = async (params: any) => {
       const parserInput = String(params?.inputText ?? '');
-      if (parserInput.includes('微信 /agent 请求')) {
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        assert.match(parserInput, /"command": "agent"/);
         return {
           outputText: JSON.stringify({
-            title: '修复测试失败项',
-            goal: '检查当前项目测试并修复失败项',
-            expectedOutput: '代码修复和测试结果',
-            plan: ['检查测试失败日志', '修复失败代码', '重新运行测试并汇总结果'],
-            category: 'code',
-            riskLevel: 'medium',
-            mode: 'codex',
+            action: 'create_draft',
+            draft: {
+              title: '修复测试失败项',
+              goal: '检查当前项目测试并修复失败项',
+              expectedOutput: '代码修复和测试结果',
+              plan: ['检查测试失败日志', '修复失败代码', '重新运行测试并汇总结果'],
+              category: 'code',
+              riskLevel: 'medium',
+              mode: 'codex',
+            },
+            confidence: 0.94,
+            requiresConfirmation: true,
           }),
         };
       }
-      if (parserInput.includes('agent 草案编辑器')) {
-        assert.match(parserInput, /当前草案 JSON/);
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "edit"')) {
+        assert.match(parserInput, /"pendingDraft":/);
         assert.match(parserInput, /检查当前项目测试并修复失败项/);
         assert.match(parserInput, /只做方案，不改代码/);
         return {
           outputText: JSON.stringify({
-            title: '测试修复方案',
-            goal: '检查当前项目测试并修复失败项',
-            expectedOutput: '一份修复方案和执行建议，不直接改代码',
-            plan: ['检查测试失败范围', '整理可行修复思路', '输出建议的执行顺序和风险'],
-            category: 'code',
-            riskLevel: 'medium',
-            mode: 'hybrid',
+            action: 'update_pending_draft',
+            draft: {
+              title: '测试修复方案',
+              goal: '检查当前项目测试并修复失败项',
+              expectedOutput: '一份修复方案和执行建议，不直接改代码',
+              plan: ['检查测试失败范围', '整理可行修复思路', '输出建议的执行顺序和风险'],
+              category: 'code',
+              riskLevel: 'medium',
+              mode: 'hybrid',
+            },
+            changes: ['限制为只做方案'],
+            confidence: 0.94,
+            requiresConfirmation: true,
           }),
         };
       }
@@ -5992,6 +6136,521 @@ test('/agent edit updates the pending agent draft instead of replacing it', asyn
     assert.ok(pending);
     assert.match(pending?.rawInput ?? '', /检查当前项目测试并修复失败项/);
     assert.match(pending?.rawInput ?? '', /Edit: 只做方案，不改代码/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent edit honors command skill reject without falling back to draft editing', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = String(params?.inputText ?? '');
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        return {
+          outputText: JSON.stringify({
+            action: 'create_draft',
+            draft: {
+              title: '检查发票流程',
+              goal: '检查发票流程并输出处理建议',
+              expectedOutput: '发票流程检查结果',
+              plan: ['检查相关记录', '整理处理建议'],
+              category: 'ops',
+              riskLevel: 'medium',
+              mode: 'codex',
+            },
+            confidence: 0.94,
+            requiresConfirmation: true,
+          }),
+        };
+      }
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "edit"')) {
+        return {
+          outputText: JSON.stringify({
+            action: 'reject',
+            reason: '这是定时任务，应该使用 /auto add 创建自动化。',
+            confidence: 0.98,
+            requiresConfirmation: false,
+          }),
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-edit-reject-1',
+      text: '/agent 检查发票流程并输出处理建议',
+    });
+
+    const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-edit-reject-1',
+      text: '/agent edit 改成每天上午9点自动检查',
+    });
+
+    const rejectedText = rejected.messages.map((message) => message.text).join('\n');
+    assert.match(rejectedText, /这是定时任务，应该使用 \/auto add 创建自动化/);
+    assert.doesNotMatch(rejectedText, /Agent 草案/);
+    assert.doesNotMatch(rejectedText, /无法理解 Agent 请求/);
+
+    const pending = runtime.services.bridgeCoordinator.getPendingAgentDraft({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-edit-reject-1',
+    });
+    assert.ok(pending);
+    assert.equal(pending?.title, '检查发票流程');
+    assert.doesNotMatch(pending?.rawInput ?? '', /每天上午9点自动检查/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent natural language list query uses the command skill instead of creating a draft', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = String(params?.inputText ?? '');
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        if (parserInput.includes('看看现在有哪些 Agent 任务')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'query_jobs',
+              query: {
+                filterText: null,
+              },
+              confidence: 0.96,
+              requiresConfirmation: false,
+            }),
+          };
+        }
+        return {
+          outputText: JSON.stringify({
+            action: 'create_draft',
+            draft: {
+              title: '项目总结',
+              goal: '写一份项目总结',
+              expectedOutput: '项目总结正文，并返回当前微信会话。',
+              plan: ['梳理项目背景', '整理关键进展', '输出总结和风险'],
+              category: 'doc',
+              riskLevel: 'low',
+              mode: 'agents',
+            },
+            confidence: 0.94,
+            requiresConfirmation: true,
+          }),
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-list-1',
+      text: '/agent 写一份项目总结',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-list-1',
+      text: '/agent confirm',
+    });
+
+    const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-list-1',
+      text: '/agent 看看现在有哪些 Agent 任务',
+    });
+
+    const listedText = listed.messages.map((message) => message.text).join('\n');
+    assert.match(listedText, /Agent 任务 \| 1 项/);
+    assert.match(listedText, /项目总结/);
+    assert.doesNotMatch(listedText, /Agent 草案/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent natural language falls back locally after one unparseable command skill result', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    let commandSkillTurns = 0;
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = String(params?.inputText ?? '');
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        commandSkillTurns += 1;
+        return {
+          outputText: 'not json',
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-parser-null-1',
+      text: '/agent 检查项目测试失败原因并给我结论',
+    });
+
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.equal(commandSkillTurns, 1);
+    assert.match(responseText, /Agent 草案/);
+    assert.doesNotMatch(responseText, /无法理解 Agent 请求/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent natural language proposes and confirms existing job management operations', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = String(params?.inputText ?? '');
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        if (parserInput.includes('"userInput": "写一份项目总结"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'create_draft',
+              draft: {
+                title: '项目总结',
+                goal: '写一份项目总结',
+                expectedOutput: '项目总结正文，并返回当前微信会话。',
+                plan: ['梳理项目背景', '整理关键进展', '输出总结和风险'],
+                category: 'doc',
+                riskLevel: 'low',
+                mode: 'agents',
+              },
+              confidence: 0.94,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "把项目总结交付物改成只输出摘要，风险改成中"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'propose_update_job',
+              target: {
+                index: 1,
+                matchText: '项目总结',
+              },
+              patch: {
+                expectedOutput: '项目总结摘要，并返回当前微信会话。',
+                riskLevel: 'medium',
+              },
+              changes: ['Changed expected output to summary only.', 'Changed risk to medium.'],
+              confidence: 0.93,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "把项目总结改名成月度总结"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'propose_rename_job',
+              target: {
+                index: 1,
+                matchText: '项目总结',
+              },
+              newTitle: '月度总结',
+              confidence: 0.93,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "重跑月度总结"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'propose_retry_job',
+              target: {
+                matchText: '月度总结',
+              },
+              reason: '用户要求重新执行该 Agent 任务。',
+              confidence: 0.92,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "删掉月度总结"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'propose_delete_job',
+              target: {
+                matchText: '月度总结',
+              },
+              reason: '用户要求删除这个 Agent 任务记录。',
+              confidence: 0.92,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+      }
+      return originalStartTurn(params);
+    };
+
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent 写一份项目总结',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent confirm',
+    });
+
+    const updateDraft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent 把项目总结交付物改成只输出摘要，风险改成中',
+    });
+    const updateDraftText = updateDraft.messages.map((message) => message.text).join('\n');
+    assert.match(updateDraftText, /Agent 操作草案 \| 更新任务/);
+    assert.match(updateDraftText, /交付物：项目总结摘要/);
+    assert.match(updateDraftText, /风险：中/);
+    assert.equal(runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+    })[0]?.expectedOutput, '项目总结正文，并返回当前微信会话。');
+
+    const updated = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent confirm',
+    });
+    assert.match(updated.messages.map((message) => message.text).join('\n'), /Agent 任务已更新/);
+    const updatedJob = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+    })[0];
+    assert.equal(updatedJob?.title, '项目总结');
+    assert.equal(updatedJob?.expectedOutput, '项目总结摘要，并返回当前微信会话。');
+    assert.equal(updatedJob?.riskLevel, 'medium');
+
+    const renameDraft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent 把项目总结改名成月度总结',
+    });
+    const renameDraftText = renameDraft.messages.map((message) => message.text).join('\n');
+    assert.match(renameDraftText, /Agent 操作草案 \| 重命名任务/);
+    assert.match(renameDraftText, /标题：月度总结/);
+    assert.equal(runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+    })[0]?.title, '项目总结');
+
+    const pendingPreview = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent',
+    });
+    assert.match(pendingPreview.messages.map((message) => message.text).join('\n'), /Agent 操作草案 \| 重命名任务/);
+
+    const renamed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent confirm',
+    });
+    assert.match(renamed.messages.map((message) => message.text).join('\n'), /Agent 任务标题已更新/);
+    assert.equal(runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+    })[0]?.title, '月度总结');
+
+    const retryDraft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent 重跑月度总结',
+    });
+    assert.match(retryDraft.messages.map((message) => message.text).join('\n'), /Agent 操作草案 \| 重试任务/);
+
+    const retried = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent confirm',
+    });
+    assert.match(retried.messages.map((message) => message.text).join('\n'), /Agent 任务已重新排队/);
+    assert.deepEqual(retried.meta?.systemAction, { kind: 'run_agent_sweep' });
+
+    const deleteDraft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent 删掉月度总结',
+    });
+    assert.match(deleteDraft.messages.map((message) => message.text).join('\n'), /Agent 操作草案 \| 删除任务/);
+
+    const deleted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+      text: '/agent confirm',
+    });
+    assert.match(deleted.messages.map((message) => message.text).join('\n'), /Agent 任务已删除/);
+    assert.equal(runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-manage-1',
+    }).length, 0);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent natural language can show, export, and resend existing job outputs', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-natural-output-'));
+    const reportPath = path.join(tempDir, 'report.txt');
+    fs.writeFileSync(reportPath, 'report file');
+    const { runtime, openai } = makeRuntime({ defaultCwd: tempDir });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = String(params?.inputText ?? '');
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        if (parserInput.includes('"userInput": "生成报告"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'create_draft',
+              draft: {
+                title: '报告任务',
+                goal: '生成一份报告',
+                expectedOutput: '报告正文和附件。',
+                plan: ['整理材料', '生成报告', '返回结果'],
+                category: 'doc',
+                riskLevel: 'low',
+                mode: 'agents',
+              },
+              confidence: 0.94,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "查看报告结果"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'show_result',
+              target: {
+                index: 1,
+                matchText: '报告任务',
+              },
+              confidence: 0.93,
+              requiresConfirmation: false,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "导出报告结果"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'export_result',
+              target: {
+                index: 1,
+                matchText: '报告任务',
+              },
+              confidence: 0.93,
+              requiresConfirmation: false,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "把报告附件再发我"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'send_attachments',
+              target: {
+                index: 1,
+                matchText: '报告任务',
+              },
+              confidence: 0.93,
+              requiresConfirmation: false,
+            }),
+          };
+        }
+      }
+      return originalStartTurn(params);
+    };
+
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-output-1',
+      text: '/agent 生成报告',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-output-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-output-1',
+    });
+    runtime.services.agentJobs.updateJob(job.id, {
+      status: 'completed',
+      resultText: '这是完整报告结果。',
+      lastResultPreview: '这是完整报告结果。',
+      resultArtifacts: [{
+        kind: 'file',
+        path: reportPath,
+        displayName: 'report.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 11,
+        caption: '报告附件',
+        source: 'bridge_declared',
+        turnId: null,
+      }],
+    });
+
+    const shown = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-output-1',
+      text: '/agent 查看报告结果',
+    });
+    assert.match(shown.messages.map((message) => message.text).join('\n'), /Agent 结果/);
+    assert.match(shown.messages.map((message) => message.text).join('\n'), /这是完整报告结果/);
+
+    const exported = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-output-1',
+      text: '/agent 导出报告结果',
+    });
+    assert.match(exported.messages.map((message) => message.text).join('\n'), /TXT 附件/);
+    assert.equal(exported.messages.some((message) => message.mediaPath?.endsWith('.txt')), true);
+
+    const resent = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-natural-output-1',
+      text: '/agent 把报告附件再发我',
+    });
+    assert.match(resent.messages.map((message) => message.text).join('\n'), /正在重新发送 Agent 附件/);
+    assert.equal(resent.messages.some((message) => message.mediaPath === reportPath), true);
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -8864,5 +9523,78 @@ test('bridge coordinator rewrites approved execution stalls into a workaround hi
   assert.equal(
     result.meta?.codexTurn?.errorMessage,
     '审批已通过，但 Codex 未继续执行。可先 /stop，再发送 /perm full-access，然后 /retry 重新执行；该设置仅对下一轮生效。',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Command Skill schema round-trip tests
+// ---------------------------------------------------------------------------
+
+function extractMarkdownTableActions(markdown: string): Set<string> {
+  const actions = new Set<string>();
+  for (const line of markdown.split('\n')) {
+    const match = line.match(/^\|\s*`([a-z_]+)`\s*\|/);
+    if (match) {
+      actions.add(match[1]);
+    }
+  }
+  return actions;
+}
+
+function extractMarkdownInlineActions(markdown: string): Set<string> {
+  const actions = new Set<string>();
+  for (const line of markdown.split('\n')) {
+    const inlineMatch = line.match(/"action":\s*"([a-z_]+(?:\s*\|\s*[a-z_]+)*)"/);
+    if (inlineMatch) {
+      for (const action of inlineMatch[1].split('|').map((s) => s.trim())) {
+        actions.add(action);
+      }
+    }
+  }
+  return actions;
+}
+
+test('AGENT_COMMAND_SKILL_ACTIONS matches actions declared in docs/command-skills/agent.md', () => {
+  const docPath = path.resolve('docs/command-skills/agent.md');
+  const markdown = fs.readFileSync(docPath, 'utf-8');
+  const docActions = extractMarkdownTableActions(markdown);
+
+  assert.ok(docActions.size > 0, 'should extract at least one action from agent.md action table');
+
+  const missingInCode = [...docActions].filter((a) => !AGENT_COMMAND_SKILL_ACTIONS.has(a as any));
+  const missingInDoc = [...AGENT_COMMAND_SKILL_ACTIONS].filter((a) => !docActions.has(a));
+
+  assert.deepEqual(
+    missingInCode,
+    [],
+    `Actions declared in agent.md but missing from AGENT_COMMAND_SKILL_ACTIONS: ${missingInCode.join(', ')}`,
+  );
+  assert.deepEqual(
+    missingInDoc,
+    [],
+    `Actions in AGENT_COMMAND_SKILL_ACTIONS but missing from agent.md: ${missingInDoc.join(', ')}`,
+  );
+});
+
+test('REVIEW_COMMAND_SKILL_ACTIONS matches actions declared in docs/command-skills/review.md', () => {
+  const docPath = path.resolve('docs/command-skills/review.md');
+  const markdown = fs.readFileSync(docPath, 'utf-8');
+
+  const inlineActions = extractMarkdownInlineActions(markdown);
+
+  assert.ok(inlineActions.size > 0, 'should extract at least one action from review.md');
+
+  const missingInCode = [...inlineActions].filter((a) => !REVIEW_COMMAND_SKILL_ACTIONS.has(a as any));
+  const missingInDoc = [...REVIEW_COMMAND_SKILL_ACTIONS].filter((a) => !inlineActions.has(a));
+
+  assert.deepEqual(
+    missingInCode,
+    [],
+    `Actions declared in review.md but missing from REVIEW_COMMAND_SKILL_ACTIONS: ${missingInCode.join(', ')}`,
+  );
+  assert.deepEqual(
+    missingInDoc,
+    [],
+    `Actions in REVIEW_COMMAND_SKILL_ACTIONS but missing from review.md: ${missingInDoc.join(', ')}`,
   );
 });

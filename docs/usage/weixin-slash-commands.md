@@ -201,6 +201,9 @@ Run a native Codex code review for the current workspace changes.
 - `/review` reviews uncommitted changes
 - `/review base <branch>` reviews the diff against a base branch
 - `/review commit <sha>` reviews the changes introduced by a commit
+- `/review custom <instructions>` runs a prompt-driven focused review
+- `/review <natural language>` lets Codex route the request to uncommitted, base, commit, or custom review
+- the final review text tries to follow the current `/lang` setting
 - the bridge returns the native text review result directly to WeChat
 - it does not switch the current thread binding
 
@@ -211,6 +214,8 @@ Examples:
 /rv
 /review base main
 /review commit HEAD~1
+/review custom 只审查测试目录里的改动
+/review 重点看 Agent 状态流转相关改动的回归风险
 ```
 
 ### `/agent` and `/ag`

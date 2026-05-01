@@ -293,6 +293,10 @@ export type ProviderReviewTarget =
   | {
     type: 'custom';
     instructions: string;
+    focus?: string[];
+    includePaths?: string[];
+    excludePaths?: string[];
+    outputLanguage?: 'zh-CN' | 'en' | null;
   };
 
 export interface ProviderPluginContract {

@@ -271,7 +271,10 @@ function buildCodexReviewArgs({
       }
       break;
     case 'custom':
-      args.push(mergeReviewInstructions(target.instructions, buildLocaleAwareReviewPrompt(locale)));
+      args.push(mergeReviewInstructions(
+        renderCustomReviewInstructions(target),
+        buildLocaleAwareReviewPrompt(target.outputLanguage ?? locale),
+      ));
       break;
     default:
       break;
@@ -349,6 +352,35 @@ function mergeReviewInstructions(instructions: string, localePrompt: string): st
     return normalizedInstructions;
   }
   return `${normalizedInstructions}\n\n${normalizedPrompt}`;
+}
+
+function renderCustomReviewInstructions(target: Extract<ProviderReviewTarget, { type: 'custom' }>): string {
+  const lines = [String(target.instructions ?? '').trim()].filter(Boolean);
+  const focus = Array.isArray(target.focus)
+    ? target.focus.map((entry) => String(entry ?? '').trim()).filter(Boolean).slice(0, 12)
+    : [];
+  if (focus.length > 0) {
+    lines.push('');
+    lines.push('Focus areas:');
+    lines.push(...focus.map((entry) => `- ${entry}`));
+  }
+  const includePaths = Array.isArray(target.includePaths)
+    ? target.includePaths.map((entry) => String(entry ?? '').trim()).filter(Boolean).slice(0, 12)
+    : [];
+  if (includePaths.length > 0) {
+    lines.push('');
+    lines.push('Prefer these paths:');
+    lines.push(...includePaths.map((entry) => `- ${entry}`));
+  }
+  const excludePaths = Array.isArray(target.excludePaths)
+    ? target.excludePaths.map((entry) => String(entry ?? '').trim()).filter(Boolean).slice(0, 12)
+    : [];
+  if (excludePaths.length > 0) {
+    lines.push('');
+    lines.push('Avoid these paths unless necessary:');
+    lines.push(...excludePaths.map((entry) => `- ${entry}`));
+  }
+  return lines.join('\n').trim();
 }
 
 function mapRunStatusToTurnStatus(status: ReviewRunState['status']): string {
