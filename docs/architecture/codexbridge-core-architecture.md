@@ -392,6 +392,18 @@ Phase 3 moves the local adapter HTTP server into the package:
 
 - `packages/responses-adapter/src/server/responses_adapter_server.ts`
 
+Phase 4 freezes package-boundary behavior with a fixture-based contract suite:
+
+- `packages/responses-adapter/test/contracts.test.ts`
+- Responses request to Chat request conversion, including JSON/schema formatting
+- Chat response to Responses object conversion
+- Chat SSE to Responses SSE event conversion
+- function/tool call conversion and tool-name restoration
+- provider usage normalization, including Gemini-family `usageMetadata`
+- provider error and stream read-failure normalization
+- local compact fallback behavior
+- capability-driven downgrades for unsupported tools, images, and files
+
 The legacy CodexBridge paths are now re-export shims for those files. The
 CodexBridge provider integration wrapper remains at
 `src/providers/openai_compatible/plugin.ts` and is responsible for provider

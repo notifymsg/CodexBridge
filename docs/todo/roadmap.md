@@ -95,22 +95,22 @@ CodexBridge, Telegram Bridge, Mission Control, or a standalone npm package.
 
 The package should be responsible for:
 
-- [ ] Convert OpenAI Responses requests to Chat Completions requests
-- [ ] Convert Chat Completions responses back to Responses objects
-- [ ] Convert Chat Completions SSE chunks into Responses SSE events
-- [ ] Convert tool/function calls in both non-streaming and streaming paths
-- [ ] Map provider usage/token fields into Responses usage
-- [ ] Map provider errors and stream read failures into stable Responses errors
-- [ ] Apply provider capability rules for tools, reasoning/thinking, payload quirks, multimodal input, JSON/schema support, token caps, and unsupported feature downgrade
-- [ ] Expose a small local adapter server that presents `/v1/responses`, `/v1/responses/compact`, and `/v1/models`
+- [x] Convert OpenAI Responses requests to Chat Completions requests
+- [x] Convert Chat Completions responses back to Responses objects
+- [x] Convert Chat Completions SSE chunks into Responses SSE events
+- [x] Convert tool/function calls in both non-streaming and streaming paths
+- [x] Map provider usage/token fields into Responses usage
+- [x] Map provider errors and stream read failures into stable Responses errors
+- [x] Apply provider capability rules for tools, reasoning/thinking, payload quirks, multimodal input, JSON/schema support, token caps, and unsupported feature downgrade
+- [x] Expose a small local adapter server that presents `/v1/responses`, `/v1/responses/compact`, and `/v1/models`
 
-The package should **not** own:
+The package must continue **not** to own:
 
-- [ ] WeChat commands, SendGate, chunking, typing, or `ret:-2` behavior
-- [ ] Bridge sessions, provider profile selection, thread binding, `/new`, `/open`, `/threads`, or `/status`
-- [ ] `/allow`, `/deny`, `/retry`, `/reconnect`, approval state, or interrupted-turn recovery
-- [ ] Assistant records, automations, uploads, attachment archival, or i18n
-- [ ] Codex account/session management and native OpenAI app-server behavior
+- WeChat commands, SendGate, chunking, typing, or `ret:-2` behavior
+- Bridge sessions, provider profile selection, thread binding, `/new`, `/open`, `/threads`, or `/status`
+- `/allow`, `/deny`, `/retry`, `/reconnect`, approval state, or interrupted-turn recovery
+- Assistant records, automations, uploads, attachment archival, or i18n
+- Codex account/session management and native OpenAI app-server behavior
 
 Migration plan:
 
@@ -131,7 +131,7 @@ Migration plan:
 - [x] Phase 2: add package-boundary converter tests and keep CodexBridge tests as integration coverage
 - [x] Phase 3: move the local adapter HTTP server into the package; keep `src/providers/openai_compatible/plugin.ts` as the CodexBridge integration wrapper
 - [x] Phase 3: make CodexBridge pass provider profile/env config into the adapter package through the legacy server shim instead of importing converter internals directly
-- [ ] Phase 4: add contract tests at the package boundary for Responses request, Chat request, non-streaming output, streaming output, tool calls, usage, errors, compact fallback, and multimodal downgrades
+- [x] Phase 4: add contract tests at the package boundary for Responses request, Chat request, non-streaming output, streaming output, tool calls, usage, errors, compact fallback, and multimodal downgrades
 - [ ] Phase 4: run live smoke tests through CodexBridge profiles only after package-level tests pass
 - [ ] Phase 5: decide whether to publish as `@codexbridge/responses-adapter`; keep it private/internal until the API boundary is stable
 - [ ] Phase 5: optionally add a standalone HTTP proxy binary only after the package is stable. The first product target remains CodexBridge integration, not a public gateway.
@@ -183,6 +183,21 @@ Phase 3 server migration:
 - [x] Added package-level server tests for compact fallback, model metadata, and local port reservation
 - [x] Phase 3 verification run on 2026-05-06: `responses-adapter:typecheck`, `responses-adapter:test`, `responses-adapter:check-boundary`, `responses-adapter:build`, OpenAI-compatible adapter/server/config/plugin/WebSocket repair tests, root `typecheck`, root `build`, and `git diff --check`
 
+Phase 4 package contract suite:
+
+- [x] Added `packages/responses-adapter/test/contracts.test.ts` as the package-boundary contract suite
+- [x] Covered Responses request to Chat request conversion without bridge-owned fields
+- [x] Covered non-streaming Chat response to completed Responses object conversion
+- [x] Covered function tool request conversion, tool-name shortening, and response-side name restoration
+- [x] Covered model-level tool disabling and transcript downgrade behavior
+- [x] Covered streaming text and tool-call deltas into Responses SSE events
+- [x] Covered OpenAI usage, Gemini-family `usageMetadata`, and estimated usage fallback
+- [x] Covered upstream stream errors and upstream read failures as `response.failed`
+- [x] Covered local compact fallback output
+- [x] Covered multimodal downgrade for unsupported image and file input
+- [x] Phase 4 full verification run on 2026-05-06: `responses-adapter:check-boundary`, `responses-adapter:typecheck`, `responses-adapter:test`, `responses-adapter:build`, OpenAI-compatible adapter/server/config/plugin/WebSocket repair tests, root `typecheck`, root `build`, and `git diff --check`
+- [ ] Phase 4 live provider smoke tests through real CodexBridge profiles remain pending after package checks pass
+
 Reference usage:
 
 - [ ] Use codex-proxy as the main reference for Codex Responses event handling, `previous_response_id`, function-call streams, and real protocol tests
@@ -197,7 +212,7 @@ Completion criteria:
 - [x] The adapter package has no imports from CodexBridge core, platform runtimes, stores, slash commands, or i18n
 - [x] Legacy CodexBridge import paths still work through re-export shims during the migration window
 - [ ] Adding a new OpenAI-compatible provider normally requires config/capability data, not a new provider plugin class
-- [ ] Unsupported provider features produce clear downgrade/error behavior instead of silent stalls or malformed upstream payloads
+- [x] Unsupported provider features produce clear downgrade/error behavior instead of silent stalls or malformed upstream payloads
 - [x] Existing CodexBridge OpenAI-compatible tests pass through the new package boundary
 
 ### Guardrail

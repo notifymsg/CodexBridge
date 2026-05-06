@@ -1,6 +1,6 @@
 export const RESPONSES_ADAPTER_PACKAGE_NAME = '@codexbridge/responses-adapter' as const;
 
-export const RESPONSES_ADAPTER_PACKAGE_PHASE = 'phase-3-server' as const;
+export const RESPONSES_ADAPTER_PACKAGE_PHASE = 'phase-4-contracts' as const;
 
 export const RESPONSES_ADAPTER_OWNS = [
   'responses-to-chat-conversion',
