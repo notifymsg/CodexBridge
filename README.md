@@ -287,10 +287,10 @@ CODEXBRIDGE_AGENT_API=chat_completions
 OpenAI-compatible runtime adapter:
 
 - CodexBridge can expose non-OpenAI providers through a local Responses adapter while Codex app-server still talks to a Responses-shaped endpoint.
-- The adapter now handles `/responses/compact`, Chat Completions conversion, stream error mapping, usage fallback, provider/model thinking policy, payload compatibility, multimodal input capability flags, and model capability metadata.
+- The adapter now handles `/responses/compact`, Chat Completions conversion, stream error mapping, CLIProxyAPI top-level stream error chunks, stream read failure framing, configured transient upstream retry, usage fallback including Gemini-family `usageMetadata`, provider/model thinking policy, CLIProxyAPI-style payload compatibility (`default`, `default-raw`/`defaultRaw`, `override`, `override-raw`/`overrideRaw`, `filter`, `root`, protocol/model matching), multimodal input capability flags, and model capability metadata.
 - DeepSeek, MiniMax, Qwen, OpenRouter, Kimi, Gemini, and iFlow are loaded as `providerKind: openai-compatible`; they differ by env vars and capability presets only, not separate provider plugin classes.
 - The model capability catalog follows the same direction as CLIProxyAPI: model quirks are represented as data (`thinking`, `payload`, tool support, multimodal support, token caps), while the executor stays generic.
-- Current built-in catalog covers the CLIProxyAPI model families used by Codex-style routing: Codex, DeepSeek, MiniMax, Qwen, iFlow, Kimi, OpenRouter, Gemini/AI Studio/Vertex, Claude, and Antigravity. Native auth/header systems from CLIProxyAPI are not copied into this adapter; use provider env vars or the custom `CODEX_COMPAT_*` profile for deployment-specific credentials.
+- Current built-in catalog covers the CLIProxyAPI model families used by Codex-style routing: Codex, DeepSeek, MiniMax, Qwen, iFlow, Kimi, OpenRouter, Gemini/AI Studio/Vertex, Claude, and Antigravity. `*_MODEL_CATALOG_PATH` can also point at a CLIProxyAPI `models.json`-shaped catalog object; CodexBridge flattens it and merges model token/thinking metadata into runtime capabilities. Native auth/header systems from CLIProxyAPI are not copied into this adapter; use provider env vars or the custom `CODEX_COMPAT_*` profile for deployment-specific credentials.
 - Auth pools, proxy rotation, and custom provider header management remain deployment-layer concerns and are intentionally separate from the generic OpenAI-compatible adapter.
 
 Runtime provider examples:
@@ -302,6 +302,8 @@ DEEPSEEK_DEFAULT_MODEL=deepseek-v4-flash
 MINIMAX_API_KEY=...
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 MINIMAX_MODEL=MiniMax-M2.7
+MINIMAX_REQUEST_RETRY=2
+MINIMAX_RETRY_STATUSES=429,503
 
 KIMI_API_KEY=...
 KIMI_BASE_URL=https://api.kimi.com/coding
@@ -320,6 +322,7 @@ CODEX_COMPAT_API_KEY=...
 CODEX_COMPAT_BASE_URL=https://provider.example/v1
 CODEX_COMPAT_DEFAULT_MODEL=example-model
 CODEX_COMPAT_CAPABILITIES=default # or deepseek/minimax/qwen/kimi/gemini/iflow/openrouter
+CODEX_COMPAT_REQUEST_RETRY=2
 ```
 
 ### `/model` and `/m`

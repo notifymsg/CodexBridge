@@ -6,7 +6,10 @@ import {
   responsesRequestToChatCompletions,
   translateChatCompletionsSseStreamToResponsesSse,
 } from './responses_adapter.js';
-import type { OpenAICompatibleProviderCapabilities } from '../shared/thinking_policy.js';
+import type {
+  OpenAICompatibleProviderCapabilities,
+  OpenAICompatibleRetryCapabilities,
+} from '../shared/thinking_policy.js';
 
 type JsonRecord = Record<string, any>;
 
@@ -28,6 +31,7 @@ export interface OpenAICompatibleResponsesAdapterServerOptions {
 const DEFAULT_UPSTREAM_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_MODEL = 'gpt-5.4';
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
+const DEFAULT_RETRY_STATUSES = [403, 408, 429, 500, 502, 503, 504];
 
 export class OpenAICompatibleResponsesAdapterServer {
   private readonly apiKey: string;
@@ -192,7 +196,7 @@ export class OpenAICompatibleResponsesAdapterServer {
         include_usage: true,
       };
     }
-    const upstream = await this.fetchImpl(
+    const upstream = await this.fetchUpstreamWithRetry(
       buildChatCompletionsUrl(this.upstreamBaseUrl, this.upstreamChatCompletionsPath),
       {
         method: 'POST',
@@ -204,18 +208,17 @@ export class OpenAICompatibleResponsesAdapterServer {
         body: JSON.stringify(chatBody),
       },
     );
-    if (!upstream.ok) {
-      const text = await upstream.text().catch(() => '');
-      writeJson(response, upstream.status || 502, {
-        error: normalizeUpstreamError(text, this.providerName, upstream.status),
+    if (!upstream.response.ok) {
+      writeJson(response, upstream.response.status || 502, {
+        error: normalizeUpstreamError(upstream.errorText ?? '', this.providerName, upstream.response.status),
       });
       return;
     }
     if (stream) {
-      await this.writeStreamingResponse(requestBody, upstream, response);
+      await this.writeStreamingResponse(requestBody, upstream.response, response);
       return;
     }
-    const json = await upstream.json();
+    const json = await upstream.response.json();
     writeJson(response, 200, chatCompletionsResponseToResponses(json, {
       request: requestBody,
       providerCapabilities: this.providerCapabilities,
@@ -244,7 +247,7 @@ export class OpenAICompatibleResponsesAdapterServer {
     }
 
     const compactPath = normalizePath(this.providerCapabilities.upstreamResponsesCompactPath) || '/responses/compact';
-    const upstream = await this.fetchImpl(
+    const upstream = await this.fetchUpstreamWithRetry(
       buildChatCompletionsUrl(this.upstreamBaseUrl, compactPath),
       {
         method: 'POST',
@@ -256,18 +259,47 @@ export class OpenAICompatibleResponsesAdapterServer {
         body: JSON.stringify(compactBody),
       },
     );
-    if (!upstream.ok) {
-      const text = await upstream.text().catch(() => '');
-      writeJson(response, upstream.status || 502, {
-        error: normalizeUpstreamError(text, this.providerName, upstream.status),
+    if (!upstream.response.ok) {
+      writeJson(response, upstream.response.status || 502, {
+        error: normalizeUpstreamError(upstream.errorText ?? '', this.providerName, upstream.response.status),
       });
       return;
     }
-    const text = await upstream.text();
+    const text = await upstream.response.text();
     response.writeHead(200, {
-      'Content-Type': upstream.headers.get('Content-Type') || 'application/json; charset=utf-8',
+      'Content-Type': upstream.response.headers.get('Content-Type') || 'application/json; charset=utf-8',
     });
     response.end(text);
+  }
+
+  private async fetchUpstreamWithRetry(url: string, init: RequestInit): Promise<{
+    response: Response;
+    errorText: string | null;
+  }> {
+    const retry = normalizeRetryCapabilities(this.providerCapabilities?.retry);
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
+      let upstream: Response;
+      try {
+        upstream = await this.fetchImpl(url, init);
+      } catch (error) {
+        lastError = error;
+        if (attempt < retry.maxAttempts && retry.retryNetworkErrors) {
+          await sleep(resolveRetryDelayMs(null, '', attempt, retry));
+          continue;
+        }
+        throw error;
+      }
+      if (upstream.ok || attempt >= retry.maxAttempts || !retry.retryStatuses.has(upstream.status)) {
+        return {
+          response: upstream,
+          errorText: upstream.ok ? null : await upstream.text().catch(() => ''),
+        };
+      }
+      const text = await upstream.text().catch(() => '');
+      await sleep(resolveRetryDelayMs(upstream.headers, text, attempt, retry));
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'OpenAI-compatible upstream retry failed.'));
   }
 
   private async writeStreamingResponse(
@@ -464,25 +496,157 @@ function normalizeUpstreamError(text: string, providerName: string, status: numb
         return {
           message: normalizeString(parsed.error.message) || `${providerName} upstream returned HTTP ${status}`,
           type: normalizeString(parsed.error.type) || 'upstream_error',
-          code: parsed.error.code,
+          code: parsed.error.code ?? upstreamErrorCode(status),
           param: parsed.error.param,
         };
       }
       return {
         message: normalizeString(parsed?.message) || trimmed,
         type: normalizeString(parsed?.type) || 'upstream_error',
+        code: parsed?.code ?? upstreamErrorCode(status),
       };
     } catch {
       return {
         message: trimmed,
         type: 'upstream_error',
+        code: upstreamErrorCode(status),
       };
     }
   }
   return {
     message: `${providerName} upstream returned HTTP ${status}`,
     type: 'upstream_error',
+    code: upstreamErrorCode(status),
   };
+}
+
+function normalizeRetryCapabilities(capabilities: OpenAICompatibleRetryCapabilities | null | undefined): {
+  maxAttempts: number;
+  retryStatuses: Set<number>;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  retryAfterMaxMs: number;
+  retryNetworkErrors: boolean;
+} {
+  if (!capabilities || typeof capabilities !== 'object') {
+    return {
+      maxAttempts: 1,
+      retryStatuses: new Set(DEFAULT_RETRY_STATUSES),
+      baseDelayMs: 0,
+      maxDelayMs: 0,
+      retryAfterMaxMs: 0,
+      retryNetworkErrors: false,
+    };
+  }
+  const maxAttempts = clampInteger(capabilities.maxAttempts, 1, 5, 1);
+  return {
+    maxAttempts,
+    retryStatuses: new Set(normalizeRetryStatuses(capabilities.retryStatuses) ?? DEFAULT_RETRY_STATUSES),
+    baseDelayMs: clampInteger(capabilities.baseDelayMs, 0, 30_000, 250),
+    maxDelayMs: clampInteger(capabilities.maxDelayMs, 0, 60_000, 2_000),
+    retryAfterMaxMs: clampInteger(capabilities.retryAfterMaxMs, 0, 300_000, 30_000),
+    retryNetworkErrors: Boolean(capabilities.retryNetworkErrors),
+  };
+}
+
+function normalizeRetryStatuses(value: unknown): number[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const statuses = value
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isInteger(entry) && entry >= 100 && entry <= 599);
+  return statuses.length > 0 ? [...new Set(statuses)] : null;
+}
+
+function resolveRetryDelayMs(
+  headers: Headers | null,
+  text: string,
+  attempt: number,
+  retry: ReturnType<typeof normalizeRetryCapabilities>,
+): number {
+  const retryAfter = parseRetryAfterMs(headers?.get('retry-after') ?? null)
+    ?? parseRetryAfterMsFromBody(text);
+  if (retryAfter !== null) {
+    return retry.retryAfterMaxMs > 0 ? Math.min(retryAfter, retry.retryAfterMaxMs) : retryAfter;
+  }
+  if (retry.baseDelayMs <= 0 || retry.maxDelayMs <= 0) {
+    return 0;
+  }
+  return Math.min(retry.maxDelayMs, retry.baseDelayMs * (2 ** Math.max(0, attempt - 1)));
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return null;
+  }
+  const seconds = Number(normalized);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+  const timestamp = Date.parse(normalized);
+  if (Number.isFinite(timestamp)) {
+    return Math.max(0, timestamp - Date.now());
+  }
+  return null;
+}
+
+function parseRetryAfterMsFromBody(text: string): number | null {
+  const trimmed = normalizeString(text);
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parseRetryAfterMs(
+      parsed?.retry_after
+        ?? parsed?.retryAfter
+        ?? parsed?.error?.retry_after
+        ?? parsed?.error?.retryAfter
+        ?? null,
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function upstreamErrorCode(status: number): string {
+  switch (status) {
+    case 401:
+      return 'invalid_api_key';
+    case 403:
+      return 'insufficient_quota';
+    case 404:
+      return 'model_not_found';
+    case 408:
+      return 'request_timeout';
+    case 429:
+      return 'rate_limit_exceeded';
+    default:
+      if (status >= 500) {
+        return 'internal_server_error';
+      }
+      if (status >= 400) {
+        return 'invalid_request_error';
+      }
+      return 'unknown_error';
+  }
+}
+
+function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isInteger(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, number));
 }
 
 function normalizeString(value: unknown): string {

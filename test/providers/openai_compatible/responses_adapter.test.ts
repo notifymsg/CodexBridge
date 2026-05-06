@@ -4,6 +4,7 @@ import {
   chatCompletionsResponseToResponses,
   responsesRequestToCompactionResponse,
   responsesRequestToChatCompletions,
+  translateChatCompletionsSseStreamToResponsesSse,
   translateChatCompletionsSseToResponsesEvents,
 } from '../../../src/providers/openai_compatible/responses_adapter.js';
 import { getOpenAICompatibleProviderPreset } from '../../../src/providers/openai_compatible/capability_presets.js';
@@ -331,6 +332,43 @@ test('responsesRequestToChatCompletions applies provider payload compatibility r
   assert.equal(chat.max_tokens, 4096);
 });
 
+test('responsesRequestToChatCompletions applies CLIProxy-style raw, root, protocol and filter params payload rules', () => {
+  const chat = responsesRequestToChatCompletions({
+    model: 'example-pro',
+    input: 'hello',
+    extra_body: {
+      existing: true,
+    },
+  }, {
+    providerKind: 'openai-compatible',
+    providerCapabilities: {
+      payload: {
+        'default-raw': [{
+          models: [{ name: 'example-*', protocol: 'openai-compatible' }],
+          root: 'extra_body',
+          params: {
+            nested: '{"enabled":true,"count":2}',
+          },
+        }],
+        overrideRaw: [{
+          models: [{ name: 'example-pro', protocol: 'openai-compatible' }],
+          params: {
+            response_format: '{"type":"json_object"}',
+          },
+        }],
+        filter: [{
+          models: ['example-*'],
+          params: ['extra_body.existing'],
+        }],
+      } as any,
+    },
+  });
+
+  assert.deepEqual(chat.extra_body.nested, { enabled: true, count: 2 });
+  assert.equal(chat.extra_body.existing, undefined);
+  assert.deepEqual(chat.response_format, { type: 'json_object' });
+});
+
 test('responsesRequestToChatCompletions applies model capability catalog to tools and multimodal input', () => {
   const chat = responsesRequestToChatCompletions({
     model: 'text-only',
@@ -591,6 +629,62 @@ test('translateChatCompletionsSseToResponsesEvents maps upstream stream errors t
   assert.equal(failed?.response.error.type, 'rate_limit_error');
 });
 
+test('translateChatCompletionsSseToResponsesEvents maps CLIProxy-style top-level stream errors to response.failed', () => {
+  const events = translateChatCompletionsSseToResponsesEvents([
+    JSON.stringify({
+      type: 'error',
+      code: 'rate_limit_exceeded',
+      message: 'too many requests',
+      sequence_number: 4,
+    }),
+  ], {
+    request: {
+      model: 'gpt-5.4',
+    },
+  });
+
+  const failed = events.at(-1);
+  assert.equal(failed?.type, 'response.failed');
+  assert.equal(failed?.response.status, 'failed');
+  assert.equal(failed?.response.error.message, 'too many requests');
+  assert.equal(failed?.response.error.type, 'upstream_error');
+  assert.equal(failed?.response.error.code, 'rate_limit_exceeded');
+});
+
+test('translateChatCompletionsSseStreamToResponsesSse maps upstream read failures to response.failed', async () => {
+  async function* failingStream() {
+    yield JSON.stringify({
+      id: 'chatcmpl_1',
+      created: 1234,
+      choices: [{
+        index: 0,
+        delta: {
+          content: 'partial',
+        },
+      }],
+    });
+    throw new Error('socket closed');
+  }
+
+  const chunks: string[] = [];
+  for await (const chunk of translateChatCompletionsSseStreamToResponsesSse(failingStream(), {
+    request: {
+      model: 'gpt-5.4',
+    },
+  })) {
+    chunks.push(chunk);
+  }
+
+  const payloads = chunks
+    .flatMap((chunk) => chunk.split('\n'))
+    .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+    .map((line) => JSON.parse(line.slice('data: '.length)));
+  const failed = payloads.find((payload) => payload.type === 'response.failed');
+  assert.equal(failed.response.status, 'failed');
+  assert.equal(failed.response.error.message, 'socket closed');
+  assert.equal(chunks.at(-1), 'data: [DONE]\n\n');
+});
+
 test('chatCompletionsResponseToResponses can estimate usage when provider omits token counts', () => {
   const response = chatCompletionsResponseToResponses({
     id: 'chatcmpl_1',
@@ -615,6 +709,67 @@ test('chatCompletionsResponseToResponses can estimate usage when provider omits 
   assert.equal(response.usage.input_tokens > 0, true);
   assert.equal(response.usage.output_tokens > 0, true);
   assert.equal(response.usage.total_tokens, response.usage.input_tokens + response.usage.output_tokens);
+});
+
+test('chatCompletionsResponseToResponses maps Gemini-family usageMetadata into Responses usage', () => {
+  const response = chatCompletionsResponseToResponses({
+    id: 'chatcmpl_1',
+    created: 1234,
+    usageMetadata: {
+      promptTokenCount: 10,
+      candidatesTokenCount: 20,
+      thoughtsTokenCount: 3,
+      cachedContentTokenCount: 4,
+      totalTokenCount: 33,
+    },
+    choices: [{
+      message: {
+        content: 'hello',
+      },
+    }],
+  }, {
+    request: {
+      model: 'gemini-2.5-pro',
+    },
+  });
+
+  assert.equal(response.usage.input_tokens, 10);
+  assert.equal(response.usage.output_tokens, 20);
+  assert.equal(response.usage.total_tokens, 33);
+  assert.equal(response.usage.input_tokens_details.cached_tokens, 4);
+  assert.equal(response.usage.output_tokens_details.reasoning_tokens, 3);
+});
+
+test('translateChatCompletionsSseToResponsesEvents maps stream usageMetadata into completed usage', () => {
+  const events = translateChatCompletionsSseToResponsesEvents([
+    JSON.stringify({
+      id: 'chatcmpl_1',
+      created: 1234,
+      choices: [{
+        index: 0,
+        delta: {
+          content: 'OK',
+        },
+        finish_reason: 'stop',
+      }],
+      usageMetadata: {
+        promptTokenCount: 2,
+        candidatesTokenCount: 1,
+        thoughtsTokenCount: 5,
+        totalTokenCount: 8,
+      },
+    }),
+  ], {
+    request: {
+      model: 'gemini-2.5-pro',
+    },
+  });
+
+  const completed = events.at(-1)?.response;
+  assert.equal(completed.usage.input_tokens, 2);
+  assert.equal(completed.usage.output_tokens, 1);
+  assert.equal(completed.usage.output_tokens_details.reasoning_tokens, 5);
+  assert.equal(completed.usage.total_tokens, 8);
 });
 
 test('responsesRequestToCompactionResponse returns a local no-op compaction fallback', () => {

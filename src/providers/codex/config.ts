@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  buildOpenAICompatibleExternalModelCatalog,
   buildOpenAICompatibleModelCatalog,
   getOpenAICompatibleProviderPreset,
 } from '../openai_compatible/capability_presets.js';
@@ -197,19 +198,18 @@ export function resolveCommand(
   return null;
 }
 
-function loadModelCatalog(modelCatalogPath: string | null): unknown[] {
+function loadModelCatalog(modelCatalogPath: string | null): unknown {
   if (!modelCatalogPath) {
-    return [];
+    return null;
   }
   try {
     const resolvedPath = path.resolve(modelCatalogPath);
     if (!fs.existsSync(resolvedPath)) {
-      return [];
+      return null;
     }
-    const raw = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
-    return Array.isArray(raw) ? raw : [];
+    return JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -296,7 +296,10 @@ function buildPresetOpenAICompatibleProfile({
     ownedBy: normalizeString(env[`${prefix}_OWNED_BY`]) ?? preset.ownedBy,
     modelIds: parseCommaList(env[`${prefix}_MODEL_IDS`], preset.modelIds),
     modelCatalogPath: normalizeString(env[`${prefix}_MODEL_CATALOG_PATH`]),
-    capabilities: preset.capabilities,
+    capabilities: mergeOpenAICompatibleProviderCapabilities(
+      preset.capabilities,
+      buildRetryCapabilitiesFromEnv(prefix, env),
+    ),
     now,
   });
 }
@@ -340,7 +343,10 @@ function buildCustomOpenAICompatibleProfile({
     ownedBy: normalizeString(env.CODEX_COMPAT_OWNED_BY) ?? preset.ownedBy,
     modelIds: parseCommaList(env.CODEX_COMPAT_MODEL_IDS, preset.modelIds),
     modelCatalogPath: normalizeString(env.CODEX_COMPAT_MODEL_CATALOG_PATH),
-    capabilities: preset.capabilities,
+    capabilities: mergeOpenAICompatibleProviderCapabilities(
+      preset.capabilities,
+      buildRetryCapabilitiesFromEnv('CODEX_COMPAT', env),
+    ),
     now,
   });
 }
@@ -381,7 +387,10 @@ function buildLegacyOpenAICompatibleProfile({
     ownedBy: normalizeString(env.CODEX_PROVIDER_OWNED_BY) ?? preset.ownedBy,
     modelIds: parseCommaList(env.CODEX_PROVIDER_MODEL_IDS, preset.modelIds),
     modelCatalogPath,
-    capabilities: preset.capabilities,
+    capabilities: mergeOpenAICompatibleProviderCapabilities(
+      preset.capabilities,
+      buildRetryCapabilitiesFromEnv('CODEX_PROVIDER', env),
+    ),
     now,
   });
 }
@@ -419,7 +428,13 @@ function buildOpenAICompatibleProfile({
   capabilities: OpenAICompatibleProviderCapabilities | null;
   now: number;
 }): CodexProviderProfile {
-  const fileCatalog = loadModelCatalog(modelCatalogPath);
+  const fileCatalog = buildOpenAICompatibleExternalModelCatalog({
+    raw: loadModelCatalog(modelCatalogPath),
+    defaultModel,
+    displayName,
+    capabilities,
+  });
+  const effectiveCapabilities = fileCatalog.capabilities ?? capabilities;
   return {
     id,
     providerKind: 'openai-compatible',
@@ -434,18 +449,18 @@ function buildOpenAICompatibleProfile({
       providerLabel,
       backendBaseUrl: baseUrl,
       modelCatalogPath,
-      modelCatalog: fileCatalog.length > 0
-        ? fileCatalog
+      modelCatalog: fileCatalog.catalog.length > 0
+        ? fileCatalog.catalog
         : buildOpenAICompatibleModelCatalog({
           defaultModel,
           modelIds,
           displayName,
-          capabilities,
+          capabilities: effectiveCapabilities,
         }),
       modelCatalogMode: 'overlay-only',
       upstreamChatCompletionsPath,
       ownedBy,
-      capabilities: mergeOpenAICompatibleProviderCapabilities(capabilities),
+      capabilities: mergeOpenAICompatibleProviderCapabilities(effectiveCapabilities),
     },
     createdAt: now,
     updatedAt: now,
@@ -461,6 +476,68 @@ function parseCommaList(value: unknown, fallback: string[]): string[] {
     ? value.split(',').map((entry) => entry.trim()).filter(Boolean)
     : [];
   return parsed.length > 0 ? parsed : [...fallback];
+}
+
+function buildRetryCapabilitiesFromEnv(
+  prefix: string,
+  env: NodeJS.ProcessEnv,
+): OpenAICompatibleProviderCapabilities | null {
+  const requestRetry = parseInteger(env[`${prefix}_REQUEST_RETRY`]);
+  const retryStatuses = parseIntegerList(env[`${prefix}_RETRY_STATUSES`]);
+  const maxRetryIntervalMs = parseInteger(env[`${prefix}_MAX_RETRY_INTERVAL_MS`]);
+  const maxRetryIntervalSeconds = parseInteger(env[`${prefix}_MAX_RETRY_INTERVAL`]);
+  const retryNetworkErrors = parseOptionalBoolean(env[`${prefix}_RETRY_NETWORK_ERRORS`]);
+  if (
+    requestRetry === null
+    && retryStatuses.length === 0
+    && maxRetryIntervalMs === null
+    && maxRetryIntervalSeconds === null
+    && retryNetworkErrors === null
+  ) {
+    return null;
+  }
+  return {
+    retry: {
+      maxAttempts: requestRetry === null ? undefined : requestRetry + 1,
+      retryStatuses: retryStatuses.length > 0 ? retryStatuses : undefined,
+      retryAfterMaxMs: maxRetryIntervalMs ?? (maxRetryIntervalSeconds === null ? undefined : maxRetryIntervalSeconds * 1000),
+      maxDelayMs: maxRetryIntervalMs ?? (maxRetryIntervalSeconds === null ? undefined : maxRetryIntervalSeconds * 1000),
+      retryNetworkErrors: retryNetworkErrors ?? undefined,
+    },
+  };
+}
+
+function parseInteger(value: unknown): number | null {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return null;
+  }
+  const number = Number(normalized);
+  return Number.isInteger(number) && number >= 0 ? number : null;
+}
+
+function parseIntegerList(value: unknown): number[] {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return [];
+  }
+  return [...new Set(
+    normalized
+      .split(',')
+      .map((entry) => Number(entry.trim()))
+      .filter((entry) => Number.isInteger(entry) && entry >= 100 && entry <= 599),
+  )];
+}
+
+function parseOptionalBoolean(value: unknown): boolean | null {
+  if (value === undefined) {
+    return null;
+  }
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return null;
+  }
+  return normalized !== 'false' && normalized !== '0';
 }
 
 function resolveAgentModelFallbackForBaseUrl(env: NodeJS.ProcessEnv, baseUrl: string): string | null {

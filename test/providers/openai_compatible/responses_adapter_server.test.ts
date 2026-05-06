@@ -110,3 +110,96 @@ test('OpenAICompatibleResponsesAdapterServer exposes model capability metadata i
     await server.stop();
   }
 });
+
+test('OpenAICompatibleResponsesAdapterServer retries configured transient upstream statuses', async () => {
+  let calls = 0;
+  const server = new OpenAICompatibleResponsesAdapterServer({
+    apiKey: 'test-key',
+    upstreamBaseUrl: 'https://provider.example/v1',
+    fetchImpl: (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'temporarily overloaded',
+          },
+        }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        id: 'chatcmpl_1',
+        created: 1234,
+        model: 'example-model',
+        choices: [{
+          message: {
+            content: 'OK',
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch,
+    providerCapabilities: {
+      retry: {
+        maxAttempts: 2,
+        retryStatuses: [503],
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+      },
+    },
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'example-model',
+        input: 'hello',
+      }),
+    });
+    const body = await response.json() as any;
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.equal(body.output[0].content[0].text, 'OK');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('OpenAICompatibleResponsesAdapterServer maps upstream HTTP status to OpenAI-style error codes', async () => {
+  const server = new OpenAICompatibleResponsesAdapterServer({
+    apiKey: 'test-key',
+    upstreamBaseUrl: 'https://provider.example/v1',
+    fetchImpl: (async () => new Response(JSON.stringify({
+      error: {
+        message: 'slow down',
+        type: 'rate_limit_error',
+      },
+    }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch,
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'example-model',
+        input: 'hello',
+      }),
+    });
+    const body = await response.json() as any;
+    assert.equal(response.status, 429);
+    assert.equal(body.error.message, 'slow down');
+    assert.equal(body.error.type, 'rate_limit_error');
+    assert.equal(body.error.code, 'rate_limit_exceeded');
+  } finally {
+    await server.stop();
+  }
+});

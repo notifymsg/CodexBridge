@@ -152,6 +152,7 @@ export function responsesRequestToChatCompletions(
 
   applyOpenAICompatiblePayloadCompatibility(chat, {
     model,
+    protocol: options.providerKind,
     providerCapabilities,
   });
 
@@ -224,7 +225,7 @@ export function chatCompletionsResponseToResponses(
     responseModel: normalizeString(chatResponse?.model) || null,
     status: 'completed',
     output,
-    usage: mapUsage(chatResponse?.usage)
+    usage: mapProviderUsage(chatResponse)
       ?? estimateUsageIfEnabled(request, output, options),
   });
 }
@@ -263,13 +264,19 @@ export async function* translateChatCompletionsSseStreamToResponsesSse(
   options: ResponsesSseTranslateOptions = {},
 ): AsyncGenerator<string> {
   const state = createStreamState(options);
-  for await (const chunk of chunks) {
-    for (const event of translateChatCompletionStreamData(chunk, state)) {
+  try {
+    for await (const chunk of chunks) {
+      for (const event of translateChatCompletionStreamData(chunk, state)) {
+        yield formatSseEvent(event);
+      }
+    }
+    for (const event of finishStreamState(state)) {
       yield formatSseEvent(event);
     }
-  }
-  for (const event of finishStreamState(state)) {
-    yield formatSseEvent(event);
+  } catch (error) {
+    for (const event of failStreamState(state, normalizeUnknownErrorObject(error))) {
+      yield formatSseEvent(event);
+    }
   }
   yield 'data: [DONE]\n\n';
 }
@@ -615,6 +622,9 @@ function translateChatCompletionStreamData(data: string, state: StreamState): Js
   if (chunk?.error && typeof chunk.error === 'object') {
     return failStreamState(state, normalizeErrorObject(chunk.error));
   }
+  if (normalizeString(chunk?.type) === 'error') {
+    return failStreamState(state, normalizeTopLevelStreamErrorObject(chunk));
+  }
   if (!state.createdEmitted) {
     const upstreamResponseId = normalizeString(chunk?.id);
     const upstreamCreatedAt = normalizeNumber(chunk?.created);
@@ -630,7 +640,7 @@ function translateChatCompletionStreamData(data: string, state: StreamState): Js
     state.responseModel = upstreamModel;
   }
   const events = ensureStreamStarted(state);
-  state.usage = mapUsage(chunk?.usage) ?? state.usage;
+  state.usage = mapProviderUsage(chunk) ?? state.usage;
 
   for (const choice of normalizeArray(chunk?.choices)) {
     const choiceIndex = Number.isFinite(Number(choice?.index)) ? Number(choice.index) : 0;
@@ -1187,27 +1197,39 @@ function applyOpenAICompatiblePayloadCompatibility(
   chat: JsonRecord,
   {
     model,
+    protocol,
     providerCapabilities,
   }: {
     model: string;
+    protocol?: string | null;
     providerCapabilities: OpenAICompatibleProviderCapabilities | null | undefined;
   },
 ): JsonRecord {
   const payload = providerCapabilities?.payload;
   if (payload && typeof payload === 'object') {
-    for (const rule of payload.default ?? []) {
-      if (payloadRuleMatchesModel(rule, model)) {
-        applyPayloadParams(chat, rule.params, false);
+    for (const rule of payloadRuleList(payload, 'default')) {
+      if (payloadRuleMatchesModel(rule, model, protocol)) {
+        applyPayloadParams(chat, rule.params, false, rule.root);
       }
     }
-    for (const rule of payload.override ?? []) {
-      if (payloadRuleMatchesModel(rule, model)) {
-        applyPayloadParams(chat, rule.params, true);
+    for (const rule of payloadRuleList(payload, 'defaultRaw', 'default-raw')) {
+      if (payloadRuleMatchesModel(rule, model, protocol)) {
+        applyPayloadParams(chat, rule.params, false, rule.root, true);
       }
     }
-    for (const rule of payload.filter ?? []) {
-      if (payloadRuleMatchesModel(rule, model)) {
-        for (const path of rule.paths ?? []) {
+    for (const rule of payloadRuleList(payload, 'override')) {
+      if (payloadRuleMatchesModel(rule, model, protocol)) {
+        applyPayloadParams(chat, rule.params, true, rule.root);
+      }
+    }
+    for (const rule of payloadRuleList(payload, 'overrideRaw', 'override-raw')) {
+      if (payloadRuleMatchesModel(rule, model, protocol)) {
+        applyPayloadParams(chat, rule.params, true, rule.root, true);
+      }
+    }
+    for (const rule of payloadRuleList(payload, 'filter')) {
+      if (payloadRuleMatchesModel(rule, model, protocol)) {
+        for (const path of payloadFilterPaths(rule)) {
           deleteNestedPath(chat, path);
         }
       }
@@ -1220,30 +1242,126 @@ function applyOpenAICompatiblePayloadCompatibility(
   return omitUndefined(chat);
 }
 
-function applyPayloadParams(target: JsonRecord, params: Record<string, unknown> | undefined, overwrite: boolean): void {
-  if (!params || typeof params !== 'object') {
+function payloadRuleList(
+  payload: OpenAICompatibleProviderCapabilities['payload'],
+  key: keyof NonNullable<OpenAICompatibleProviderCapabilities['payload']>,
+  legacyKey?: string,
+): OpenAICompatiblePayloadRule[] {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+  const primary = payload[key];
+  if (Array.isArray(primary)) {
+    return primary;
+  }
+  if (legacyKey) {
+    const legacy = (payload as JsonRecord)[legacyKey];
+    if (Array.isArray(legacy)) {
+      return legacy;
+    }
+  }
+  return [];
+}
+
+function applyPayloadParams(
+  target: JsonRecord,
+  params: Record<string, unknown> | string[] | undefined,
+  overwrite: boolean,
+  root?: string | null,
+  raw = false,
+): void {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) {
     return;
   }
   for (const [path, value] of Object.entries(params)) {
     if (!path || value === undefined) {
       continue;
     }
-    if (!overwrite && getNestedPath(target, path) !== undefined) {
+    const fullPath = buildPayloadPath(root, path);
+    if (!fullPath) {
       continue;
     }
-    setNestedPath(target, path, cloneJson(value));
+    if (!overwrite && getNestedPath(target, fullPath) !== undefined) {
+      continue;
+    }
+    const nextValue = raw ? normalizeRawPayloadValue(value) : cloneJson(value);
+    if (nextValue === undefined) {
+      continue;
+    }
+    setNestedPath(target, fullPath, nextValue);
   }
 }
 
-function payloadRuleMatchesModel(rule: OpenAICompatiblePayloadRule, model: string): boolean {
+function payloadFilterPaths(rule: OpenAICompatiblePayloadRule): string[] {
+  const rawPaths = Array.isArray(rule.paths)
+    ? rule.paths
+    : Array.isArray(rule.params)
+      ? rule.params
+      : [];
+  return rawPaths
+    .map((path) => buildPayloadPath(rule.root, path))
+    .filter(Boolean);
+}
+
+function payloadRuleMatchesModel(
+  rule: OpenAICompatiblePayloadRule,
+  model: string,
+  protocol?: string | null,
+): boolean {
   const patterns = Array.isArray(rule.models)
-    ? rule.models.map((entry) => normalizeString(entry)).filter(Boolean)
+    ? rule.models.map((entry) => payloadModelRulePattern(entry, protocol)).filter(Boolean)
     : [];
   if (patterns.length === 0) {
     return true;
   }
   const normalizedModel = normalizeString(model).toLowerCase();
   return patterns.some((pattern) => matchesModelPattern(normalizedModel, pattern));
+}
+
+function payloadModelRulePattern(entry: unknown, protocol?: string | null): string {
+  if (typeof entry === 'string') {
+    return normalizeString(entry);
+  }
+  if (!entry || typeof entry !== 'object') {
+    return '';
+  }
+  const record = entry as JsonRecord;
+  const expectedProtocol = normalizeString(record.protocol).toLowerCase();
+  const actualProtocol = normalizeString(protocol).toLowerCase();
+  if (expectedProtocol && actualProtocol && expectedProtocol !== actualProtocol) {
+    return '';
+  }
+  return normalizeString(record.name);
+}
+
+function buildPayloadPath(root: unknown, path: unknown): string {
+  const normalizedRoot = normalizeString(root);
+  let normalizedPath = normalizeString(path);
+  if (!normalizedRoot) {
+    return normalizedPath;
+  }
+  if (!normalizedPath) {
+    return normalizedRoot;
+  }
+  if (normalizedPath.startsWith('.')) {
+    normalizedPath = normalizedPath.slice(1);
+  }
+  return `${normalizedRoot}.${normalizedPath}`;
+}
+
+function normalizeRawPayloadValue(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return cloneJson(value);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
 }
 
 function matchesModelPattern(normalizedModel: string, pattern: string): boolean {
@@ -1316,6 +1434,19 @@ function describeUnsupportedInputPart(part: JsonRecord, kind: 'image' | 'file'):
     || 'file';
 }
 
+function mapProviderUsage(payload: JsonRecord | null | undefined): JsonRecord | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  return mapUsage(payload.usage)
+    ?? mapGeminiFamilyUsage(
+      payload.usageMetadata
+        ?? payload.usage_metadata
+        ?? payload.response?.usageMetadata
+        ?? payload.response?.usage_metadata,
+    );
+}
+
 function mapUsage(usage: JsonRecord | null | undefined): JsonRecord | null {
   if (!usage || typeof usage !== 'object') {
     return null;
@@ -1329,6 +1460,29 @@ function mapUsage(usage: JsonRecord | null | undefined): JsonRecord | null {
     input_tokens_details: usage.prompt_tokens_details ?? usage.input_tokens_details,
     output_tokens_details: usage.completion_tokens_details ?? usage.output_tokens_details,
   });
+}
+
+function mapGeminiFamilyUsage(usage: unknown): JsonRecord | null {
+  if (!usage || typeof usage !== 'object') {
+    return null;
+  }
+  const record = usage as JsonRecord;
+  const inputTokens = normalizeNumber(record.promptTokenCount ?? record.prompt_token_count) ?? 0;
+  const outputTokens = normalizeNumber(record.candidatesTokenCount ?? record.candidates_token_count) ?? 0;
+  const reasoningTokens = normalizeNumber(record.thoughtsTokenCount ?? record.thoughts_token_count) ?? 0;
+  const cachedTokens = normalizeNumber(record.cachedContentTokenCount ?? record.cached_content_token_count) ?? 0;
+  const totalTokens = normalizeNumber(record.totalTokenCount ?? record.total_token_count)
+    ?? inputTokens + outputTokens + reasoningTokens;
+  if (inputTokens === 0 && outputTokens === 0 && reasoningTokens === 0 && totalTokens === 0) {
+    return null;
+  }
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+    input_tokens_details: { cached_tokens: cachedTokens },
+    output_tokens_details: { reasoning_tokens: reasoningTokens },
+  };
 }
 
 function estimateUsageIfEnabled(
@@ -1391,6 +1545,25 @@ function normalizeErrorObject(error: JsonRecord): JsonRecord {
       || normalizeString(error?.error?.message)
       || JSON.stringify(error),
     type: normalizeString(error?.type) || normalizeString(error?.error?.type) || 'upstream_error',
+    code: error?.code ?? error?.error?.code,
+    param: error?.param ?? error?.error?.param,
+  });
+}
+
+function normalizeUnknownErrorObject(error: unknown): JsonRecord {
+  if (error && typeof error === 'object') {
+    return normalizeErrorObject(error as JsonRecord);
+  }
+  return {
+    message: normalizeString(error) || 'OpenAI-compatible upstream stream failed.',
+    type: 'upstream_stream_error',
+  };
+}
+
+function normalizeTopLevelStreamErrorObject(error: JsonRecord): JsonRecord {
+  return omitUndefined({
+    message: normalizeString(error?.message) || JSON.stringify(error),
+    type: normalizeString(error?.error?.type) || 'upstream_error',
     code: error?.code ?? error?.error?.code,
     param: error?.param ?? error?.error?.param,
   });

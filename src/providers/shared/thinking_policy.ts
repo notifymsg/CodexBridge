@@ -40,15 +40,23 @@ export interface OpenAICompatibleThinkingPolicyOverrides {
   booleanFalseParams?: Record<string, unknown>;
 }
 
+export type OpenAICompatiblePayloadModelRule = string | {
+  name?: string | null;
+  protocol?: string | null;
+};
+
 export interface OpenAICompatiblePayloadRule {
-  models?: string[];
+  models?: OpenAICompatiblePayloadModelRule[];
+  root?: string | null;
   paths?: string[];
-  params?: Record<string, unknown>;
+  params?: Record<string, unknown> | string[];
 }
 
 export interface OpenAICompatiblePayloadCompatibility {
   default?: OpenAICompatiblePayloadRule[];
+  defaultRaw?: OpenAICompatiblePayloadRule[];
   override?: OpenAICompatiblePayloadRule[];
+  overrideRaw?: OpenAICompatiblePayloadRule[];
   filter?: OpenAICompatiblePayloadRule[];
 }
 
@@ -67,6 +75,15 @@ export interface OpenAICompatibleUsageCapabilities {
   estimateWhenMissing?: boolean;
 }
 
+export interface OpenAICompatibleRetryCapabilities {
+  maxAttempts?: number;
+  retryStatuses?: number[];
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  retryAfterMaxMs?: number;
+  retryNetworkErrors?: boolean;
+}
+
 export interface OpenAICompatibleModelCapabilities {
   tools?: boolean;
   vision?: boolean;
@@ -83,6 +100,7 @@ export interface OpenAICompatibleModelCapabilities {
   payload?: OpenAICompatiblePayloadCompatibility | null;
   multimodal?: OpenAICompatibleMultimodalCapabilities | null;
   usage?: OpenAICompatibleUsageCapabilities | null;
+  retry?: OpenAICompatibleRetryCapabilities | null;
 }
 
 export interface OpenAICompatibleProviderCapabilities {
@@ -94,6 +112,7 @@ export interface OpenAICompatibleProviderCapabilities {
   payload?: OpenAICompatiblePayloadCompatibility | null;
   multimodal?: OpenAICompatibleMultimodalCapabilities | null;
   usage?: OpenAICompatibleUsageCapabilities | null;
+  retry?: OpenAICompatibleRetryCapabilities | null;
   modelCapabilities?: Record<string, OpenAICompatibleModelCapabilities> | null;
 }
 
@@ -315,6 +334,15 @@ export function mergeOpenAICompatibleProviderCapabilities(
         ...entry.usage,
       };
     }
+    if (entry.retry && typeof entry.retry === 'object') {
+      merged.retry = {
+        ...(merged.retry ?? {}),
+        ...entry.retry,
+        retryStatuses: normalizeRetryStatuses(entry.retry.retryStatuses)
+          ?? normalizeRetryStatuses(merged.retry?.retryStatuses)
+          ?? undefined,
+      };
+    }
     if (entry.modelCapabilities && typeof entry.modelCapabilities === 'object') {
       merged.modelCapabilities = {
         ...(merged.modelCapabilities ?? {}),
@@ -438,6 +466,9 @@ function convertModelCapabilitiesToProviderCapabilities(
   if (modelCapabilities.usage && typeof modelCapabilities.usage === 'object') {
     overrides.usage = modelCapabilities.usage;
   }
+  if (modelCapabilities.retry && typeof modelCapabilities.retry === 'object') {
+    overrides.retry = modelCapabilities.retry;
+  }
   return overrides;
 }
 
@@ -501,9 +532,20 @@ function mergePayloadCompatibility(
   previous: OpenAICompatiblePayloadCompatibility | null | undefined,
   next: OpenAICompatiblePayloadCompatibility,
 ): OpenAICompatiblePayloadCompatibility {
+  const nextRecord = next as Record<string, unknown>;
   return {
     default: [...(previous?.default ?? []), ...(Array.isArray(next.default) ? next.default : [])],
+    defaultRaw: [
+      ...(previous?.defaultRaw ?? []),
+      ...(Array.isArray(next.defaultRaw) ? next.defaultRaw : []),
+      ...(Array.isArray(nextRecord['default-raw']) ? nextRecord['default-raw'] as OpenAICompatiblePayloadRule[] : []),
+    ],
     override: [...(previous?.override ?? []), ...(Array.isArray(next.override) ? next.override : [])],
+    overrideRaw: [
+      ...(previous?.overrideRaw ?? []),
+      ...(Array.isArray(next.overrideRaw) ? next.overrideRaw : []),
+      ...(Array.isArray(nextRecord['override-raw']) ? nextRecord['override-raw'] as OpenAICompatiblePayloadRule[] : []),
+    ],
     filter: [...(previous?.filter ?? []), ...(Array.isArray(next.filter) ? next.filter : [])],
   };
 }
@@ -528,6 +570,16 @@ function normalizePayloadParams(value: unknown): Record<string, unknown> | null 
     return null;
   }
   return { ...(value as Record<string, unknown>) };
+}
+
+function normalizeRetryStatuses(value: unknown): number[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const statuses = value
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isInteger(entry) && entry >= 100 && entry <= 599);
+  return statuses.length > 0 ? [...new Set(statuses)] : null;
 }
 
 function normalizeReasoningEffort(value: unknown): string | null {

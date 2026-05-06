@@ -472,6 +472,10 @@ The OpenAI-compatible adapter follows the CLIProxyAPI-style split:
 - provider selection is env/profile configuration
 - model differences live in a capability catalog
 - thinking/reasoning quirks are translated by model capability, not by a dedicated provider class
+- payload quirks use CLIProxyAPI-style rules, including raw JSON values, root paths, protocol/model matching, overrides, defaults, and filters
+- stream errors and Gemini-family `usageMetadata` are normalized back into Responses-shaped failures and usage
+- `*_MODEL_CATALOG_PATH` can import either a normal array catalog or a CLIProxyAPI `models.json` object and merge token/thinking metadata into runtime capabilities
+- transient retry is explicit env configuration, for example `MINIMAX_REQUEST_RETRY=2`, `MINIMAX_RETRY_STATUSES=429,503`, or `CODEX_COMPAT_REQUEST_RETRY=2`
 - unavoidable local translator repairs, such as Kimi model alias rewrite and iFlow boolean thinking flags, stay inside the generic adapter layer
 
 ### `/models` and `/ms`

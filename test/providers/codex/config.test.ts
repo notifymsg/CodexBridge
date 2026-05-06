@@ -89,6 +89,60 @@ test('loadCodexProfilesFromEnv exposes additional CLIProxy-style compatible pres
   assert.equal(iflow?.config.defaultModel, 'qwen3-coder-plus');
 });
 
+test('loadCodexProfilesFromEnv imports CLIProxyAPI models.json shaped catalogs', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-cliproxy-catalog-'));
+  const catalogPath = path.join(tempDir, 'models.json');
+  fs.writeFileSync(catalogPath, JSON.stringify({
+    qwen: [{
+      id: 'qwen-test',
+      object: 'model',
+      owned_by: 'qwen',
+      display_name: 'Qwen Test',
+      description: 'Imported from CLIProxy-style catalog',
+      max_completion_tokens: 12345,
+      thinking: {
+        min: 128,
+        max: 8192,
+        zero_allowed: true,
+      },
+    }],
+  }));
+
+  const result = loadCodexProfilesFromEnv({
+    CODEX_REAL_BIN: '/usr/bin/codex',
+    CODEX_COMPAT_PROVIDER_ID: 'compat-catalog',
+    CODEX_COMPAT_API_KEY: 'sk-test',
+    CODEX_COMPAT_DEFAULT_MODEL: 'qwen-test',
+    CODEX_COMPAT_MODEL_CATALOG_PATH: catalogPath,
+  });
+
+  const profile = result.profiles.find((entry) => entry.id === 'compat-catalog');
+  const model = (profile?.config.modelCatalog as any[])[0];
+  assert.equal(model.id, 'qwen-test');
+  assert.equal(model.displayName, 'Qwen Test');
+  assert.equal(model.capabilities.maxOutputTokens, 12345);
+  assert.deepEqual(model.supportedReasoningEfforts, ['none', 'low', 'medium', 'high']);
+  assert.equal(profile?.config.capabilities?.modelCapabilities?.['qwen-test'].maxOutputTokens, 12345);
+});
+
+test('loadCodexProfilesFromEnv maps compatible provider retry env to capabilities', () => {
+  const result = loadCodexProfilesFromEnv({
+    CODEX_REAL_BIN: '/usr/bin/codex',
+    MINIMAX_API_KEY: 'sk-test',
+    MINIMAX_REQUEST_RETRY: '2',
+    MINIMAX_RETRY_STATUSES: '429,503',
+    MINIMAX_MAX_RETRY_INTERVAL: '5',
+    MINIMAX_RETRY_NETWORK_ERRORS: 'true',
+  });
+
+  const profile = result.profiles.find((entry) => entry.id === 'minimax');
+  assert.equal(profile?.config.capabilities?.retry?.maxAttempts, 3);
+  assert.deepEqual(profile?.config.capabilities?.retry?.retryStatuses, [429, 503]);
+  assert.equal(profile?.config.capabilities?.retry?.retryAfterMaxMs, 5000);
+  assert.equal(profile?.config.capabilities?.retry?.maxDelayMs, 5000);
+  assert.equal(profile?.config.capabilities?.retry?.retryNetworkErrors, true);
+});
+
 test('resolveCommand prefers codex.exe before wrapper scripts on Windows', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-config-win-path-'));
   fs.writeFileSync(path.join(tempDir, 'codex.cmd'), '@echo off\r\n');
