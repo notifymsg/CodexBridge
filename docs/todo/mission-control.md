@@ -244,12 +244,21 @@ Completion criteria:
   - latest blocker
   - attempt history
   - final result summary
-- [ ] Add `/agent show` integration so workpad becomes the main status view
+- [x] Add `/agent show` integration so workpad becomes the main status view
 
 Completion criteria:
 
 - [x] Workflow source is visible in mission status
-- [ ] Workpad can survive restart and multiple attempts
+- [x] Workpad can survive restart and multiple attempts
+
+Phase 2 source-of-truth tests:
+
+- `test/core/bridge_coordinator.test.ts`
+  - `/agent show, retry, rename, stop, and delete manage queued jobs`
+  - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+  - `/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt`
+- `test/store/file_json_repositories.test.ts`
+  - `file-backed repositories preserve agent jobs across repository reloads`
 
 ## Phase 3: Workspace and Lease Management
 

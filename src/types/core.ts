@@ -190,6 +190,15 @@ export type AgentJobStatus =
   | 'failed'
   | 'stopped';
 
+export interface AgentJobAttemptHistoryEntry {
+  attempt: number;
+  status: AgentJobStatus;
+  verifierSummary: string | null;
+  outputPreview: string | null;
+  error: string | null;
+  recordedAt: number;
+}
+
 export interface AgentJob {
   id: string;
   platform: string;
@@ -218,6 +227,12 @@ export interface AgentJob {
   resultArtifacts?: TurnArtifactDeliveredItem[] | null;
   lastError: string | null;
   verificationSummary: string | null;
+  missionWorkflowPath: string | null;
+  missionWorkflowSourceLabel: string | null;
+  missionWorkpadLatestBlocker: string | null;
+  missionWorkpadLatestVerifierSummary: string | null;
+  missionWorkpadFinalResultSummary: string | null;
+  missionAttemptHistory: AgentJobAttemptHistoryEntry[];
   createdAt: number;
   updatedAt: number;
 }

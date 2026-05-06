@@ -7741,7 +7741,9 @@ test('/agent show, retry, rename, stop, and delete manage queued jobs', async ()
       externalScopeId: 'wx-agent-2',
       text: '/agent show 1',
     });
-    assert.match(show.messages.map((message) => message.text).join('\n'), /Agent 详情/);
+    const showText = show.messages.map((message) => message.text).join('\n');
+    assert.match(showText, /Agent 详情/);
+    assert.match(showText, /工作流：/);
 
     const renamed = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7838,6 +7840,85 @@ test('/agent runAgentJob retries after an interrupted provider turn and complete
     const completed = runtime.services.agentJobs.getById(job.id);
     assert.equal(completed.status, 'completed');
     assert.equal(completed.attemptCount, 2);
+
+    const show = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-interrupted-1',
+      text: '/agent show 1',
+    });
+    const showText = show.messages.map((message) => message.text).join('\n');
+    assert.match(showText, /尝试记录：/);
+    assert.match(showText, /#2 completed/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workflow-prompt-'));
+  const workflowPath = path.join(cwd, '.codexbridge', 'mission', 'WORKFLOW.md');
+  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+  fs.writeFileSync(workflowPath, `---
+version: 1
+maxTurns: 5
+finalReportSections:
+  - summary
+  - verification
+  - handoff
+---
+Always mention the workflow checkpoint before the final answer.
+Stop and hand off when you need human approval.
+`);
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: cwd });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-workflow-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-workflow-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-workflow-1',
+    });
+    let capturedInputText = '';
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const inputText = String(params?.inputText ?? '');
+      if (inputText.includes('你正在执行 CodexBridge 后台 Agent 任务。')) {
+        capturedInputText = inputText;
+        const turnId = `${params.bridgeSession.codexThreadId}-agent-workflow-turn-1`;
+        await params.onTurnStarted?.({
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+        });
+        return {
+          outputText: '已按 workflow 执行并完成验证。',
+          outputState: 'complete',
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+          title: params.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(capturedInputText, /Workflow source:/);
+    assert.match(capturedInputText, /Always mention the workflow checkpoint before the final answer/);
+    assert.match(capturedInputText, /Final report contract/);
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;

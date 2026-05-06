@@ -11,6 +11,11 @@ import {
   normalizeAssistantRecordForStorage,
   type AssistantRecordDraft,
 } from './assistant_record_service.js';
+import {
+  buildMissionControlledAgentExecutionPrompt,
+  createAgentJobStatusView,
+  loadMissionWorkflowForAgentJob,
+} from './mission_control_agent_job_adapter.js';
 import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
@@ -6054,6 +6059,9 @@ export class BridgeCoordinator {
       ], this.buildScopedSessionMeta(event));
     }
     const job = resolved.job;
+    const workflowLoadResult = loadMissionWorkflowForAgentJob(job);
+    const workflow = workflowLoadResult.workflow;
+    const missionStatusView = createAgentJobStatusView(job, workflow);
     const lines = [
       this.t('coordinator.agent.detailTitle', { title: job.title }),
       this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
@@ -6062,12 +6070,23 @@ export class BridgeCoordinator {
       this.t('coordinator.agent.risk', { value: formatAgentRisk(job.riskLevel, this.currentI18n) }),
       this.t('coordinator.agent.providerProfile', { value: job.providerProfileId }),
       this.t('coordinator.agent.workingDirectory', { value: job.cwd ?? this.t('common.notSet') }),
+      this.t('coordinator.agent.workflow', {
+        value: workflow
+          ? workflow.source.label
+          : workflowLoadResult.error?.message ?? job.missionWorkflowSourceLabel ?? this.t('common.notSet'),
+      }),
       this.t('coordinator.agent.goal', { value: job.goal }),
       this.t('coordinator.agent.expectedOutput', { value: job.expectedOutput }),
       this.t('coordinator.agent.planTitle'),
       ...job.plan.map((line, index) => `${index + 1}. ${line}`),
       this.t('coordinator.agent.attempts', { value: `${job.attemptCount}/${job.maxAttempts}` }),
     ];
+    if (missionStatusView.summary) {
+      lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
+    }
+    if (missionStatusView.latestBlocker) {
+      lines.push(this.t('coordinator.agent.workpadBlocker', { value: missionStatusView.latestBlocker }));
+    }
     if (job.verificationSummary) {
       lines.push(this.t('coordinator.agent.verification', { value: job.verificationSummary }));
     }
@@ -6082,6 +6101,10 @@ export class BridgeCoordinator {
     }
     if (job.lastError) {
       lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+    }
+    if (job.missionAttemptHistory.length > 0) {
+      lines.push(this.t('coordinator.agent.attemptHistoryTitle'));
+      lines.push(...missionStatusView.attemptHistory.map((line) => `- ${line}`));
     }
     lines.push(this.t('coordinator.agent.detailActions', { index: resolved.index }));
     return messageResponse(lines, this.buildScopedSessionMeta(event));
@@ -10463,6 +10486,26 @@ export class BridgeCoordinator {
     let lastResult = null;
     let lastSession = session;
     let lastVerification: AgentVerificationResult | null = null;
+    const workflowLoadResult = loadMissionWorkflowForAgentJob(current);
+    if (!workflowLoadResult.workflow) {
+      const workflowError = workflowLoadResult.error?.message ?? 'Mission workflow could not be loaded.';
+      this.agentJobs.failJob(current.id, {
+        error: workflowError,
+        verificationSummary: workflowError,
+      });
+      return messageResponse([
+        this.t('coordinator.agent.failed'),
+        this.t('coordinator.agent.workflowInvalid', { value: workflowError }),
+      ], this.buildScopedSessionMeta({
+        platform: current.platform,
+        externalScopeId: current.externalScopeId,
+      }));
+    }
+    const workflow = workflowLoadResult.workflow;
+    this.agentJobs.updateJob(current.id, {
+      missionWorkflowPath: workflow.source.path,
+      missionWorkflowSourceLabel: workflow.source.label,
+    });
     for (let attempt = Math.max(1, current.attemptCount + 1); attempt <= current.maxAttempts; attempt += 1) {
       const live = this.agentJobs.getById(current.id) ?? current;
       if (live.stopRequested || live.status === 'stopped') {
@@ -10472,7 +10515,11 @@ export class BridgeCoordinator {
           this.t('coordinator.agent.title', { value: live.title }),
         ], buildSessionMeta(lastSession));
       }
-      this.agentJobs.markRunning(current.id);
+      this.agentJobs.markRunning(current.id, {
+        attempt,
+        workflowPath: workflow.source.path,
+        workflowSourceLabel: workflow.source.label,
+      });
       await emitProgressUpdate(
         options.onProgress ?? null,
         this.t('coordinator.agent.progressRunning', {
@@ -10485,10 +10532,12 @@ export class BridgeCoordinator {
       const agentEvent = {
         platform: current.platform,
         externalScopeId: current.externalScopeId,
-        text: buildAgentExecutionPrompt(current, {
+        text: buildMissionControlledAgentExecutionPrompt(current, {
           attempt,
-          previousVerification: lastVerification,
+          previousVerificationSummary: lastVerification?.summary ?? null,
+          previousVerificationIssues: lastVerification?.issues ?? [],
           previousResultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
+          workflow,
           locale: current.locale ?? this.currentI18n.locale,
         }),
         cwd: current.cwd,
@@ -12137,45 +12186,6 @@ ${JSON.stringify(currentDraft, null, 2)}
 Edit instruction:
 ${instruction}`;
   return localizedInstruction.trim();
-}
-
-function buildAgentExecutionPrompt(job: AgentJob, params: {
-  attempt: number;
-  previousVerification: AgentVerificationResult | null;
-  previousResultPreview: string | null;
-  locale: string | null;
-}): string {
-  const language = normalizeLocale(params.locale) === 'zh-CN' ? '中文' : 'English';
-  const lines = [
-    `你正在执行 CodexBridge 后台 Agent 任务。请用${language}回复最终结果。`,
-    '',
-    `任务标题：${job.title}`,
-    `目标：${job.goal}`,
-    `最终交付物：${job.expectedOutput}`,
-    `执行模式：${job.mode}`,
-    `当前尝试：${params.attempt}/${job.maxAttempts}`,
-    '',
-    '计划：',
-    ...job.plan.map((line, index) => `${index + 1}. ${line}`),
-    '',
-    '执行要求：',
-    '- 你有 full-access 配置；除非确实必须，不要向用户请求审批。',
-    '- 如果需要修改代码，请直接修改、测试并说明结果。',
-    '- 如果是研究或文档任务，请给出可直接使用的结构化结果。',
-    '- 最终回复必须包含：完成内容、验证结果、未完成风险。',
-  ];
-  if (params.previousVerification) {
-    lines.push(
-      '',
-      '上一轮 verifier 未通过：',
-      params.previousVerification.summary,
-      ...params.previousVerification.issues.map((issue) => `- ${issue}`),
-    );
-  }
-  if (params.previousResultPreview) {
-    lines.push('', `上一轮输出摘要：${params.previousResultPreview}`);
-  }
-  return lines.join('\n');
 }
 
 function buildAgentVerifierPrompt(job: AgentJob, result, locale: string | null): string {
