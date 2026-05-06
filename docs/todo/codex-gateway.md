@@ -84,6 +84,7 @@ Latest progress:
 - [x] The standalone launcher now supports dotenv-style env-file loading (`CODEX_GATEWAY_ENV_FILE` / `--env-file`) so it can run without manual shell exports
 - [x] `codex-proxy`-inspired regression tests now lock `previous_response_id` preservation and Codex-style stream event ordering at the package server boundary
 - [x] LiteLLM-inspired upstream error normalization now preserves `retry_after_ms` plus selected request/rate-limit headers at the package server boundary
+- [x] LiteLLM-style model catalog pricing and context-window metadata are now normalized and preserved through package `/v1/models` output
 
 ## Packaging Direction
 

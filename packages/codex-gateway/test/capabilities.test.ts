@@ -46,6 +46,38 @@ test('external model catalogs merge model-level capabilities', () => {
   });
 });
 
+test('external model catalogs normalize LiteLLM-style pricing and context metadata', () => {
+  const catalog = buildOpenAICompatibleExternalModelCatalog({
+    raw: {
+      openrouter: [{
+        id: 'openai/gpt-4o-mini',
+        display_name: 'GPT-4o Mini',
+        max_input_tokens: 128000,
+        input_cost_per_token: 1.5e-7,
+        output_cost_per_token: 6e-7,
+        search_context_cost_per_query: {
+          low: 0.001,
+          high: 0.002,
+        },
+      }],
+    },
+    defaultModel: 'openai/gpt-4o-mini',
+    displayName: 'OpenRouter',
+    capabilities: null,
+  });
+
+  assert.equal(catalog.catalog.length, 1);
+  assert.equal(catalog.catalog[0].contextWindow, 128000);
+  assert.deepEqual(catalog.catalog[0].pricing, {
+    inputCostPerToken: 1.5e-7,
+    outputCostPerToken: 6e-7,
+    searchContextCostPerQuery: {
+      low: 0.001,
+      high: 0.002,
+    },
+  });
+});
+
 test('thinking policy resolves explicit effort through package-local model info', () => {
   const capabilities = mergeOpenAICompatibleProviderCapabilities({
     thinking: {

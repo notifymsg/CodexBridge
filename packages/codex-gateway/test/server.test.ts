@@ -81,6 +81,11 @@ test('adapter server exposes model metadata from package boundary', async () => 
     apiKey: 'test-key',
     models: [{
       id: 'example-model',
+      contextWindow: 128000,
+      pricing: {
+        inputCostPerToken: 1.5e-7,
+        outputCostPerToken: 6e-7,
+      },
       capabilities: {
         tools: true,
         vision: false,
@@ -94,6 +99,11 @@ test('adapter server exposes model metadata from package boundary', async () => 
     const body = await response.json() as any;
     assert.equal(response.status, 200);
     assert.equal(body.data[0].id, 'example-model');
+    assert.equal(body.data[0].contextWindow, 128000);
+    assert.deepEqual(body.data[0].pricing, {
+      inputCostPerToken: 1.5e-7,
+      outputCostPerToken: 6e-7,
+    });
     assert.deepEqual(body.data[0].capabilities, {
       tools: true,
       vision: false,
