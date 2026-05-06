@@ -23,6 +23,9 @@ export interface MissionWorkflowPolicy {
   version: 1;
   maxTurns: number | null;
   maxAttempts: number | null;
+  maxRuntimeMs: number | null;
+  maxArtifactCount: number | null;
+  maxArtifactBytes: number | null;
   continuation: MissionWorkflowContinuationMode;
   requirePlanUpdate: boolean;
   requireWorkpadUpdate: boolean;
@@ -119,6 +122,11 @@ export class MissionWorkflowLoader {
         version: 1,
         maxTurns: validated.maxTurns ?? null,
         maxAttempts: validated.maxAttempts ?? null,
+        maxRuntimeMs: validated.maxRuntimeMinutes !== undefined
+          ? validated.maxRuntimeMinutes * 60_000
+          : null,
+        maxArtifactCount: validated.maxArtifactCount ?? null,
+        maxArtifactBytes: validated.maxArtifactBytes ?? null,
         continuation: validated.continuation ?? 'allow',
         requirePlanUpdate: validated.requirePlanUpdate ?? true,
         requireWorkpadUpdate: validated.requireWorkpadUpdate ?? true,
@@ -164,6 +172,9 @@ export class MissionWorkflowLoader {
         version: 1,
         maxTurns: null,
         maxAttempts: null,
+        maxRuntimeMs: null,
+        maxArtifactCount: null,
+        maxArtifactBytes: null,
         continuation: 'allow',
         requirePlanUpdate: true,
         requireWorkpadUpdate: true,
@@ -279,6 +290,9 @@ function validateWorkflowFrontMatter(
   version?: 1;
   maxTurns?: number;
   maxAttempts?: number;
+  maxRuntimeMinutes?: number;
+  maxArtifactCount?: number;
+  maxArtifactBytes?: number;
   continuation?: MissionWorkflowContinuationMode;
   requirePlanUpdate?: boolean;
   requireWorkpadUpdate?: boolean;
@@ -291,6 +305,9 @@ function validateWorkflowFrontMatter(
     'version',
     'maxTurns',
     'maxAttempts',
+    'maxRuntimeMinutes',
+    'maxArtifactCount',
+    'maxArtifactBytes',
     'continuation',
     'requirePlanUpdate',
     'requireWorkpadUpdate',
@@ -312,6 +329,21 @@ function validateWorkflowFrontMatter(
 
   const maxTurns = validateOptionalPositiveInteger(frontMatter.maxTurns, 'maxTurns', issues);
   const maxAttempts = validateOptionalPositiveInteger(frontMatter.maxAttempts, 'maxAttempts', issues);
+  const maxRuntimeMinutes = validateOptionalPositiveInteger(
+    frontMatter.maxRuntimeMinutes,
+    'maxRuntimeMinutes',
+    issues,
+  );
+  const maxArtifactCount = validateOptionalPositiveInteger(
+    frontMatter.maxArtifactCount,
+    'maxArtifactCount',
+    issues,
+  );
+  const maxArtifactBytes = validateOptionalPositiveInteger(
+    frontMatter.maxArtifactBytes,
+    'maxArtifactBytes',
+    issues,
+  );
   const continuation = validateOptionalEnum(
     frontMatter.continuation,
     'continuation',
@@ -345,6 +377,9 @@ function validateWorkflowFrontMatter(
     version: version as 1 | undefined,
     maxTurns,
     maxAttempts,
+    maxRuntimeMinutes,
+    maxArtifactCount,
+    maxArtifactBytes,
     continuation,
     requirePlanUpdate,
     requireWorkpadUpdate,

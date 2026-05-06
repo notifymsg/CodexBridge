@@ -43,6 +43,9 @@ export function createMissionWorkpadStatusView(
       if (attempt.verifierVerdict) {
         parts.push(`verdict=${attempt.verifierVerdict}`);
       }
+      if (attempt.missingAcceptanceCriteria.length > 0) {
+        parts.push(`missing=${attempt.missingAcceptanceCriteria.length}`);
+      }
       if (attempt.outputPreview) {
         parts.push(`preview=${truncate(attempt.outputPreview, 96)}`);
       }

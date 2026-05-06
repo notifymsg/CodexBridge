@@ -321,27 +321,41 @@ Phase 4 source-of-truth tests:
 This phase is the core difference between a background chat wrapper and a real
 mission runtime.
 
-- [ ] Add `MissionVerifier`
-- [ ] Normalize verifier verdicts:
+- [x] Add `MissionVerifier`
+- [x] Normalize verifier verdicts:
   - `complete`
   - `repair`
   - `blocked`
+  - `waiting_user`
+  - `needs_human`
+  - `handoff`
   - `failed`
-- [ ] Persist verifier summaries and missing acceptance criteria
-- [ ] Add repair prompt generation / reuse
+- [x] Persist verifier summaries and missing acceptance criteria
+- [x] Add repair prompt generation / reuse
 - [ ] Enforce:
   - max attempts
   - max turns
   - max runtime
   - artifact count/size budget
-- [ ] Make `waiting_user` / `needs_human` / `handoff` explicit verifier- or
+- [x] Make `waiting_user` / `needs_human` / `handoff` explicit verifier- or
   provider-driven outcomes instead of generic failure buckets
+
+Phase 5 foundations landed in-package, but the orchestration loop still needs
+to consume verifier budgets and make verifier verdicts the authority for
+retry/continuation decisions.
 
 Completion criteria:
 
 - [ ] "Completed" means acceptance criteria passed
 - [ ] Missions do not silently stop after one provider response
 - [ ] Repair/retry is bounded and observable
+
+Phase 5 source-of-truth tests:
+
+- `packages/mission-control/test/verifier_foundations.test.ts`
+  - `verifier helpers normalize waiting-user and repair verdicts into explicit mission states`
+  - `verifier helpers persist summaries and missing acceptance criteria onto attempts and missions`
+  - `verifier budget helpers resolve workflow limits and report exhausted budgets`
 
 ## Phase 6: CodexBridge Integration
 

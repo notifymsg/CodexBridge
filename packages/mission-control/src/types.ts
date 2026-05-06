@@ -36,6 +36,7 @@ export type MissionAttemptStatus =
   | 'waiting_user'
   | 'needs_human'
   | 'handoff'
+  | 'blocked'
   | 'completed'
   | 'failed'
   | 'stopped';
@@ -44,6 +45,7 @@ export type MissionVerifierVerdict =
   | 'complete'
   | 'repair'
   | 'blocked'
+  | 'waiting_user'
   | 'needs_human'
   | 'handoff'
   | 'failed';
@@ -158,6 +160,7 @@ export interface MissionAttempt {
   promptDigest: string | null;
   verifierVerdict: MissionVerifierVerdict | null;
   verifierSummary: string | null;
+  missingAcceptanceCriteria: string[];
   outputPreview: string | null;
   error: string | null;
   startedAt: number | null;
@@ -200,4 +203,3 @@ export interface CreateMissionInput {
   maxTurns?: number;
   now?: number;
 }
-

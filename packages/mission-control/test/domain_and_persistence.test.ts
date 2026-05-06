@@ -13,7 +13,7 @@ import {
 import type { MissionAttempt, MissionEvent } from '../src/index.js';
 
 test('mission control package exposes the phase-1 domain and persistence surface', () => {
-  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-4-provider-foundations');
+  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-5-verifier-foundations');
 });
 
 test('mission state transitions are explicit and reject invalid transitions', () => {
@@ -89,6 +89,7 @@ test('json repository can create, update, stop, and recover resumable missions a
     promptDigest: 'digest-2',
     verifierVerdict: null,
     verifierSummary: null,
+    missingAcceptanceCriteria: [],
     outputPreview: null,
     error: null,
     startedAt: 1_700_000_100_200,

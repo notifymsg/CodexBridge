@@ -32,11 +32,12 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-4-provider-foundations`: package boundary plus durable mission
+- `phase-5-verifier-foundations`: package boundary plus durable mission
   domain, repository-backed persistence, typed workflow loading, canonical
   attempt prompt contract, workpad status rendering helpers, deterministic
-  workspace assignment, recovery-safe lease coordination, provider port, and
-  `CodexMissionProvider` adapter shell
+  workspace assignment, recovery-safe lease coordination, provider port,
+  `CodexMissionProvider` adapter shell, and verifier/budget/repair-prompt
+  primitives
 
 This package should preserve the Symphony-style separation between:
 

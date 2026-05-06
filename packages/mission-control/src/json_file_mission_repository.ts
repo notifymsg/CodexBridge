@@ -78,7 +78,9 @@ export class JsonFileMissionRepository implements MissionRepository {
       const parsed = JSON.parse(raw) as Partial<JsonState>;
       return {
         missions: Array.isArray(parsed.missions) ? cloneValue(parsed.missions) : [],
-        attempts: Array.isArray(parsed.attempts) ? cloneValue(parsed.attempts) : [],
+        attempts: Array.isArray(parsed.attempts)
+          ? parsed.attempts.map((attempt) => normalizeAttempt(cloneValue(attempt)))
+          : [],
         events: Array.isArray(parsed.events) ? cloneValue(parsed.events) : [],
       };
     } catch {
@@ -112,3 +114,11 @@ function cloneValue<T>(value: T): T {
   return structuredClone(value);
 }
 
+function normalizeAttempt(attempt: MissionAttempt): MissionAttempt {
+  return {
+    ...attempt,
+    missingAcceptanceCriteria: Array.isArray(attempt.missingAcceptanceCriteria)
+      ? [...attempt.missingAcceptanceCriteria]
+      : [],
+  };
+}

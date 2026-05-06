@@ -37,6 +37,9 @@ test('workflow loader parses front matter and prompt body from WORKFLOW.md', () 
 version: 1
 maxTurns: 7
 maxAttempts: 3
+maxRuntimeMinutes: 15
+maxArtifactCount: 4
+maxArtifactBytes: 8192
 continuation: allow
 requirePlanUpdate: true
 requireWorkpadUpdate: false
@@ -57,6 +60,9 @@ Report when the mission requires a handoff.
   assert.equal(workflow.source.kind, 'file');
   assert.equal(workflow.policy.maxTurns, 7);
   assert.equal(workflow.policy.maxAttempts, 3);
+  assert.equal(workflow.policy.maxRuntimeMs, 15 * 60_000);
+  assert.equal(workflow.policy.maxArtifactCount, 4);
+  assert.equal(workflow.policy.maxArtifactBytes, 8192);
   assert.equal(workflow.policy.requireWorkpadUpdate, false);
   assert.equal(workflow.policy.defaultHandoffState, 'handoff');
   assert.deepEqual(workflow.policy.stopConditions, [
@@ -127,6 +133,7 @@ Prefer small, verifiable changes and report blockers explicitly.
     promptDigest: 'digest-workflow-1',
     verifierVerdict: null,
     verifierSummary: null,
+    missingAcceptanceCriteria: [],
     outputPreview: null,
     error: null,
     startedAt: 1_700_100_000_100,
@@ -186,6 +193,7 @@ test('workpad status view exposes workflow source, blocker, and attempt history'
       promptDigest: 'digest-view-1',
       verifierVerdict: 'repair',
       verifierSummary: 'The first pass did not gather all logs.',
+      missingAcceptanceCriteria: ['Collect all deployment logs'],
       outputPreview: 'Missing one of the deployment logs.',
       error: 'collector timed out',
       startedAt: 1_700_200_000_100,
@@ -203,6 +211,7 @@ test('workpad status view exposes workflow source, blocker, and attempt history'
       promptDigest: 'digest-view-2',
       verifierVerdict: null,
       verifierSummary: null,
+      missingAcceptanceCriteria: [],
       outputPreview: 'Retrying log collection with a narrower scope.',
       error: null,
       startedAt: 1_700_200_000_300,
