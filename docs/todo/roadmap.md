@@ -31,13 +31,32 @@ Already landed and no longer part of the active backlog:
 
 Architecture references now available:
 
-- `reference/symphony` tracks OpenAI Symphony as the orchestration reference.
+- OpenAI Symphony is the orchestration reference. If we need a local study copy,
+  keep a git-ignored mirror under `reference/symphony`, but do not assume it is
+  always present.
 - `reference/responses-adapter` tracks LiteLLM, codex-proxy, open-responses,
   and llm-rosetta as protocol-adapter references. These sources are ignored by
   git and are for local architecture study only.
-- `docs/architecture/codex-mission-control.md` defines how CodexBridge should
+- `docs/architecture/mission-control.md` defines how CodexBridge should
   adapt Symphony-style workflow, workspace, workpad, retry, and status concepts
   without replacing the chat-first WeChat control surface.
+- `docs/todo/mission-control.md` tracks the concrete package, persistence,
+  runner-loop, verification, and integration phases for
+  `@codexbridge/mission-control`.
+
+Mission Control reference route:
+
+- `openai/symphony` defines the orchestration model
+- the Symphony essence we need to preserve is: repo-owned workflow policy,
+  single-authority orchestration, stable workspaces, continuation after normal
+  exit, and first-class handoff states
+- `openai/openai-agents-js` is the future OpenAI-native provider reference
+- `langgraphjs`, `inngest`, and `dbos-transact-ts` are durability/recovery references
+- `mastra` and `VoltAgent` are TS runtime/package-structure references
+- the copied `codex-mission-control` project is a prior prototype reference for
+  lease/heartbeat/tmux supervision, not the final product name
+- the target output is still one CodexBridge-native internal package, not an
+  upstream runtime fork
 
 Important clarification:
 
@@ -77,15 +96,20 @@ Codex output quality over adding more bridge-only command surface area.
 - [ ] Design a companion-based computer-use workflow for desktop GUI tasks with explicit approvals and app allowlists
 - [ ] Decide whether these desktop-native abilities belong in CodexBridge itself or in a separate local companion service
 
-### P2: Codex Mission Control
+### P2: Mission Control
 
+- [ ] Create `packages/mission-control` as an internal package skeleton, following the same internal-package pattern as `packages/responses-adapter`
+- [ ] Keep Mission Control in the current repository first; do not introduce a workspace/monorepo layer until multiple internal packages need independent dependency/version management
 - [ ] Treat `/agent` as the Mission Control v0 surface instead of adding a new `/mission` command too early
+- [ ] Keep Symphony's real core ideas intact: workflow-owned policy, single orchestrator authority, stable workspace identity, continuation retries after normal exit, and handoff/wait-user states
+- [ ] Mine the copied `codex-mission-control` prototype for bounded-contract, lease, heartbeat, and tmux ideas without inheriting its package name or direct shell-runner shape
 - [ ] Add `.codexbridge/mission/WORKFLOW.md` loading with YAML front matter plus prompt body, using Symphony's workflow-contract pattern
 - [ ] Add a persistent mission workpad to background jobs so `/agent show` can expose plan, acceptance criteria, validation, notes, blockers, and final handoff
 - [ ] Add workspace isolation for code-changing long-running jobs under `~/.codexbridge/mission/workspaces/<missionId>/`
 - [ ] Add a bounded runner loop for mission jobs: run, verify, repair/retry, block or complete
 - [ ] Keep WeChat as the notification and control entrypoint while allowing future GitHub/Linear issue sources
 - [ ] Keep Symphony as a reference implementation only; do not vendor its Elixir runtime into CodexBridge
+- [ ] Use `docs/todo/mission-control.md` as the detailed implementation checklist instead of overloading the main roadmap with low-level package steps
 
 ### P2: Extract reusable Responses adapter package
 
