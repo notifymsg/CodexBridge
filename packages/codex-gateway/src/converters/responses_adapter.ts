@@ -1453,12 +1453,14 @@ function mapUsage(usage: JsonRecord | null | undefined): JsonRecord | null {
   }
   const inputTokens = normalizeNumber(usage.prompt_tokens ?? usage.input_tokens) ?? 0;
   const outputTokens = normalizeNumber(usage.completion_tokens ?? usage.output_tokens) ?? 0;
+  const inputTokenDetails = normalizeInputTokenDetails(usage);
+  const outputTokenDetails = normalizeOutputTokenDetails(usage);
   return omitUndefined({
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens: normalizeNumber(usage.total_tokens) ?? inputTokens + outputTokens,
-    input_tokens_details: usage.prompt_tokens_details ?? usage.input_tokens_details,
-    output_tokens_details: usage.completion_tokens_details ?? usage.output_tokens_details,
+    input_tokens_details: inputTokenDetails ?? undefined,
+    output_tokens_details: outputTokenDetails ?? undefined,
   });
 }
 
@@ -1483,6 +1485,63 @@ function mapGeminiFamilyUsage(usage: unknown): JsonRecord | null {
     input_tokens_details: { cached_tokens: cachedTokens },
     output_tokens_details: { reasoning_tokens: reasoningTokens },
   };
+}
+
+function normalizeInputTokenDetails(usage: JsonRecord): JsonRecord | null {
+  const explicit = firstRecord(usage.prompt_tokens_details, usage.input_tokens_details);
+  const normalized = omitUndefined({
+    ...(explicit ?? {}),
+    cached_tokens: normalizeNumber(
+      explicit?.cached_tokens
+      ?? usage.cache_read_input_tokens
+      ?? usage.cached_input_tokens,
+    ) ?? undefined,
+    cache_creation_tokens: normalizeNumber(
+      explicit?.cache_creation_tokens
+      ?? usage.cache_creation_input_tokens
+      ?? usage.cached_creation_input_tokens,
+    ) ?? undefined,
+    audio_tokens: normalizeNumber(
+      explicit?.audio_tokens
+      ?? usage.input_audio_tokens
+      ?? usage.audio_tokens,
+    ) ?? undefined,
+  });
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function normalizeOutputTokenDetails(usage: JsonRecord): JsonRecord | null {
+  const explicit = firstRecord(usage.completion_tokens_details, usage.output_tokens_details);
+  const normalized = omitUndefined({
+    ...(explicit ?? {}),
+    reasoning_tokens: normalizeNumber(
+      explicit?.reasoning_tokens
+      ?? usage.reasoning_tokens
+      ?? usage.thinking_tokens,
+    ) ?? undefined,
+    audio_tokens: normalizeNumber(
+      explicit?.audio_tokens
+      ?? usage.output_audio_tokens,
+    ) ?? undefined,
+    accepted_prediction_tokens: normalizeNumber(
+      explicit?.accepted_prediction_tokens
+      ?? usage.accepted_prediction_tokens,
+    ) ?? undefined,
+    rejected_prediction_tokens: normalizeNumber(
+      explicit?.rejected_prediction_tokens
+      ?? usage.rejected_prediction_tokens,
+    ) ?? undefined,
+  });
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function firstRecord(...values: unknown[]): JsonRecord | null {
+  for (const value of values) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as JsonRecord;
+    }
+  }
+  return null;
 }
 
 function estimateUsageIfEnabled(

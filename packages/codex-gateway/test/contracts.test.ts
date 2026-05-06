@@ -269,9 +269,21 @@ test('contract: usage maps OpenAI usage, Gemini usageMetadata, and estimates whe
       prompt_tokens: 2,
       completion_tokens: 5,
       total_tokens: 7,
+      cache_read_input_tokens: 1,
+      cache_creation_input_tokens: 2,
+      reasoning_tokens: 3,
+      output_audio_tokens: 4,
+      accepted_prediction_tokens: 5,
+      rejected_prediction_tokens: 6,
     },
   });
   assert.equal(openaiUsage.usage.total_tokens, 7);
+  assert.equal(openaiUsage.usage.input_tokens_details.cached_tokens, 1);
+  assert.equal(openaiUsage.usage.input_tokens_details.cache_creation_tokens, 2);
+  assert.equal(openaiUsage.usage.output_tokens_details.reasoning_tokens, 3);
+  assert.equal(openaiUsage.usage.output_tokens_details.audio_tokens, 4);
+  assert.equal(openaiUsage.usage.output_tokens_details.accepted_prediction_tokens, 5);
+  assert.equal(openaiUsage.usage.output_tokens_details.rejected_prediction_tokens, 6);
 
   const geminiUsage = chatCompletionsResponseToResponses({
     choices: [{ message: { content: 'ok' } }],

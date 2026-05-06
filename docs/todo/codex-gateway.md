@@ -85,6 +85,7 @@ Latest progress:
 - [x] `codex-proxy`-inspired regression tests now lock `previous_response_id` preservation and Codex-style stream event ordering at the package server boundary
 - [x] LiteLLM-inspired upstream error normalization now preserves `retry_after_ms` plus selected request/rate-limit headers at the package server boundary
 - [x] LiteLLM-style model catalog pricing and context-window metadata are now normalized and preserved through package `/v1/models` output
+- [x] LiteLLM-style usage aliases such as cache, reasoning, audio, and prediction token fields are now normalized into Responses usage details at the package boundary
 
 ## Packaging Direction
 
