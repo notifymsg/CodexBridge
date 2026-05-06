@@ -306,8 +306,8 @@ The first real provider is current Codex app-server execution.
 
 Completion criteria:
 
-- [ ] Mission Control can drive a real Codex run without importing WeChat code
-- [ ] Stop/retry behavior remains chat-visible through CodexBridge integration
+- [x] Mission Control can drive a real Codex run without importing WeChat code
+- [x] Stop/retry behavior remains chat-visible through CodexBridge integration
 
 Phase 4 source-of-truth tests:
 
@@ -317,6 +317,10 @@ Phase 4 source-of-truth tests:
   - `CodexMissionProvider reuses provider profile, thread binding, and workspace assignment safely`
 - `packages/mission-control/test/runtime_loop.test.ts`
   - `mission runtime stopMission interrupts the active provider run and marks the attempt stopped`
+- `test/core/bridge_coordinator.test.ts`
+  - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+  - `/agent runAgentJob continues the same attempt after a normal partial provider exit`
+  - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
 
 ## Phase 5: Verification Loop
 
@@ -366,7 +370,7 @@ Phase 5 source-of-truth tests:
 
 ## Phase 6: CodexBridge Integration
 
-- [ ] Make `/agent` call Mission Control instead of owning the runner directly
+- [x] Make `/agent` call Mission Control instead of owning the runner directly
 - [ ] Make `/auto` schedule Mission Control runs instead of separate background
   job logic
 - [ ] Reuse the same mission state for:
@@ -375,14 +379,36 @@ Phase 5 source-of-truth tests:
   - stop
   - retry
   - result
-- [ ] Keep CodexBridge WeChat as the first-class notification/control surface
-- [ ] Preserve current user-facing behavior as much as possible during migration
+- [x] Keep CodexBridge WeChat as the first-class notification/control surface
+- [x] Preserve current user-facing behavior as much as possible during migration
+
+Phase 6a landed: `/agent runAgentJob` now delegates execution into Mission
+Control through a bridge-side adapter that:
+
+- persists mission/attempt/event snapshot state on the `AgentJob` compatibility
+  record
+- reuses existing CodexBridge turn recovery, approval, interrupt, and WeChat
+  progress delivery paths as the first host/control surface
+- preserves Mission Control verifier authority and continuation-after-normal-exit
+  behavior on the real `/agent` execution path without introducing a new
+  `/mission` command yet
 
 Completion criteria:
 
-- [ ] `/agent` remains the Mission v0 surface
-- [ ] No new `/mission` command is required yet
-- [ ] Existing users do not need to learn a new mental model
+- [x] `/agent` remains the Mission v0 surface
+- [x] No new `/mission` command is required yet
+- [x] Existing users do not need to learn a new mental model
+
+Phase 6 source-of-truth tests:
+
+- `test/core/bridge_coordinator.test.ts`
+  - `/agent drafts, confirms, runs, verifies, and records a background job`
+  - `/agent stores generated attachments and can resend them`
+  - `/agent show, retry, rename, stop, and delete manage queued jobs`
+  - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+  - `/agent runAgentJob continues the same attempt after a normal partial provider exit`
+  - `/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt`
+  - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
 
 ## Phase 7: Optional Web Surface
 

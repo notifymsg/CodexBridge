@@ -205,6 +205,18 @@ function inferVerifierVerdict(
   if (status === 'repairing' || status === 'verifying') {
     return 'repair';
   }
+  if (status === 'waiting_user') {
+    return 'waiting_user';
+  }
+  if (status === 'needs_human') {
+    return 'needs_human';
+  }
+  if (status === 'handoff') {
+    return 'handoff';
+  }
+  if (status === 'blocked') {
+    return 'blocked';
+  }
   if (status === 'failed') {
     return 'failed';
   }
@@ -235,6 +247,10 @@ function mapAgentStatusToMissionAttemptStatus(status: AgentJobStatus): MissionAt
     case 'running':
     case 'verifying':
     case 'repairing':
+    case 'waiting_user':
+    case 'needs_human':
+    case 'handoff':
+    case 'blocked':
     case 'completed':
     case 'failed':
     case 'stopped':

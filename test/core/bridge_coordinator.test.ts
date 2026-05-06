@@ -7858,6 +7858,85 @@ test('/agent runAgentJob retries after an interrupted provider turn and complete
   }
 });
 
+test('/agent runAgentJob continues the same attempt after a normal partial provider exit', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-continuation-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-continuation-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-continuation-1',
+    });
+    let executionTurns = 0;
+    const capturedInputs: string[] = [];
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const inputText = String(params?.inputText ?? '');
+      if (inputText.includes('你正在执行 CodexBridge 后台 Agent 任务。')) {
+        capturedInputs.push(inputText);
+        executionTurns += 1;
+        const turnId = `${params.bridgeSession.codexThreadId}-agent-continuation-${executionTurns}`;
+        await params.onTurnStarted?.({
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+        });
+        if (executionTurns === 1) {
+          return {
+            outputText: '已收集日志，但还没有完成最终验证。',
+            previewText: '已收集日志，但还没有完成最终验证。',
+            outputState: 'partial',
+            turnId,
+            threadId: params.bridgeSession.codexThreadId,
+            title: params.bridgeSession.title,
+          };
+        }
+        return {
+          outputText: '继续同一次尝试后完成修复，并附上验证结果。',
+          outputState: 'complete',
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+          title: params.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(responseText, /继续同一次尝试后完成修复/);
+    assert.equal(executionTurns, 2);
+    assert.match(capturedInputs[1] ?? '', /Continuation contract/);
+
+    const completed = runtime.services.agentJobs.getById(job.id);
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.attemptCount, 1);
+    assert.ok(completed.missionRuntimeState);
+    assert.equal(Array.isArray(completed.missionRuntimeState?.attempts), true);
+    assert.equal(completed.missionRuntimeState?.attempts.length, 1);
+    const providerTurnEvents = Array.isArray(completed.missionRuntimeState?.events)
+      ? completed.missionRuntimeState.events.filter((event: any) => event?.kind === 'attempt.started' && event?.metadata?.providerTurn === true)
+      : [];
+    assert.equal(providerTurnEvents.length, 2);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
 test('/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;

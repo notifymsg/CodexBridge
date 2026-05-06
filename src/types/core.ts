@@ -186,9 +186,19 @@ export type AgentJobStatus =
   | 'running'
   | 'verifying'
   | 'repairing'
+  | 'waiting_user'
+  | 'needs_human'
+  | 'handoff'
+  | 'blocked'
   | 'completed'
   | 'failed'
   | 'stopped';
+
+export interface AgentJobMissionRuntimeState {
+  mission: Record<string, unknown> | null;
+  attempts: Record<string, unknown>[];
+  events: Record<string, unknown>[];
+}
 
 export interface AgentJobAttemptHistoryEntry {
   attempt: number;
@@ -233,6 +243,7 @@ export interface AgentJob {
   missionWorkpadLatestVerifierSummary: string | null;
   missionWorkpadFinalResultSummary: string | null;
   missionAttemptHistory: AgentJobAttemptHistoryEntry[];
+  missionRuntimeState: AgentJobMissionRuntimeState | null;
   createdAt: number;
   updatedAt: number;
 }

@@ -12,10 +12,10 @@ import {
   type AssistantRecordDraft,
 } from './assistant_record_service.js';
 import {
-  buildMissionControlledAgentExecutionPrompt,
   createAgentJobStatusView,
   loadMissionWorkflowForAgentJob,
 } from './mission_control_agent_job_adapter.js';
+import { runAgentJobWithMissionControl } from './mission_control_agent_job_runner.js';
 import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
@@ -10482,193 +10482,133 @@ export class BridgeCoordinator {
         externalScopeId: current.externalScopeId,
       }));
     }
-
-    let lastResult = null;
-    let lastSession = session;
-    let lastVerification: AgentVerificationResult | null = null;
-    const workflowLoadResult = loadMissionWorkflowForAgentJob(current);
-    if (!workflowLoadResult.workflow) {
-      const workflowError = workflowLoadResult.error?.message ?? 'Mission workflow could not be loaded.';
-      this.agentJobs.failJob(current.id, {
-        error: workflowError,
-        verificationSummary: workflowError,
-      });
-      return messageResponse([
-        this.t('coordinator.agent.failed'),
-        this.t('coordinator.agent.workflowInvalid', { value: workflowError }),
-      ], this.buildScopedSessionMeta({
-        platform: current.platform,
-        externalScopeId: current.externalScopeId,
-      }));
-    }
-    const workflow = workflowLoadResult.workflow;
-    this.agentJobs.updateJob(current.id, {
-      missionWorkflowPath: workflow.source.path,
-      missionWorkflowSourceLabel: workflow.source.label,
-    });
-    for (let attempt = Math.max(1, current.attemptCount + 1); attempt <= current.maxAttempts; attempt += 1) {
-      const live = this.agentJobs.getById(current.id) ?? current;
-      if (live.stopRequested || live.status === 'stopped') {
-        this.agentJobs.requestStop(current.id);
-        return messageResponse([
-          this.t('coordinator.agent.stopped'),
-          this.t('coordinator.agent.title', { value: live.title }),
-        ], buildSessionMeta(lastSession));
-      }
-      this.agentJobs.markRunning(current.id, {
-        attempt,
-        workflowPath: workflow.source.path,
-        workflowSourceLabel: workflow.source.label,
-      });
-      await emitProgressUpdate(
-        options.onProgress ?? null,
-        this.t('coordinator.agent.progressRunning', {
-          title: current.title,
-          attempt,
-          max: current.maxAttempts,
-        }),
-        'commentary',
-      );
-      const agentEvent = {
-        platform: current.platform,
-        externalScopeId: current.externalScopeId,
-        text: buildMissionControlledAgentExecutionPrompt(current, {
-          attempt,
-          previousVerificationSummary: lastVerification?.summary ?? null,
-          previousVerificationIssues: lastVerification?.issues ?? [],
-          previousResultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
-          workflow,
-          locale: current.locale ?? this.currentI18n.locale,
-        }),
-        cwd: current.cwd,
-        locale: current.locale,
-        attachments: [],
-        metadata: {
-          codexbridge: {
-            overrideBridgeSessionId: current.bridgeSessionId,
-            agentJobId: current.id,
-            agentAttempt: attempt,
-          },
+    let missionRun;
+    try {
+      missionRun = await runAgentJobWithMissionControl({
+        job: current,
+        agentJobs: this.agentJobs,
+        resolveSession: (liveJob) => this.agentJobs.getSession(liveJob),
+        startTurnWithRecovery: (nextScopeRef, nextSession, event, turnOptions) => {
+          this.activeTurns?.beginScopeTurn(nextScopeRef, {
+            bridgeSessionId: nextSession.id,
+            providerProfileId: nextSession.providerProfileId,
+            threadId: nextSession.codexThreadId,
+          });
+          return this.startTurnWithRecovery(nextScopeRef, nextSession, event, turnOptions)
+            .finally(() => this.releaseActiveTurnIfStillRunning(nextScopeRef));
         },
-      };
-      this.activeTurns?.beginScopeTurn(scopeRef, {
-        bridgeSessionId: lastSession.id,
-        providerProfileId: lastSession.providerProfileId,
-        threadId: lastSession.codexThreadId,
-      });
-      try {
-        const turnResult = await this.startTurnWithRecovery(scopeRef, lastSession, agentEvent, options);
-        lastResult = turnResult;
-        lastSession = turnResult.session;
-      } catch (error) {
-        await this.releaseActiveTurnIfStillRunning(scopeRef);
-        const message = formatUserError(error);
-        this.agentJobs.failJob(current.id, {
-          error: message,
-        });
-        return messageResponse([
-          this.t('coordinator.agent.failed'),
-          this.t('coordinator.agent.lastError', { value: message }),
-        ], buildSessionMeta(lastSession));
-      } finally {
-        await this.releaseActiveTurnIfStillRunning(scopeRef);
-      }
-
-      this.agentJobs.markVerifying(current.id, attempt);
-      await emitProgressUpdate(
-        options.onProgress ?? null,
-        this.t('coordinator.agent.progressVerifying', {
-          title: current.title,
-        }),
-        'commentary',
-      );
-      lastVerification = await this.verifyAgentJob(current, lastResult.result, lastSession).catch((error) => ({
-        pass: false,
-        summary: this.t('coordinator.agent.verifyFailed', { error: formatUserError(error) }),
-        issues: [formatUserError(error)],
-        nextAction: 'retry' as const,
-      }));
-      const resultPreview = summarizeAgentResult(lastResult.result);
-      if (lastVerification.pass || lastVerification.nextAction === 'complete') {
-        const resultArtifacts = normalizeAgentArtifactsForStorage(normalizeArtifactsForResponse(lastResult.result));
-        const response = turnResponse(lastResult.result, this.currentI18n, buildSessionMeta(lastSession));
-        const resultText = extractCoordinatorResponseText(response) || resultPreview;
-        this.agentJobs.completeJob(current.id, {
-          resultPreview,
-          resultText,
-          resultArtifacts,
-          verificationSummary: lastVerification.summary,
-        });
-        const artifactMessages = response.messages.filter((message) => message.artifact || message.mediaPath);
-        const completionLines = [
-          this.t('coordinator.agent.completed'),
-          this.t('coordinator.agent.title', { value: current.title }),
-          this.t('coordinator.agent.verification', { value: truncateText(lastVerification.summary, 180) }),
-        ];
-        if (resultArtifacts.length > 0) {
-          completionLines.push(this.t('coordinator.agent.attachmentSending', { count: resultArtifacts.length }));
-        } else {
-          if (resultText) {
-            completionLines.push('');
-            completionLines.push(resultText);
-          }
-        }
-        response.messages = [
-          {
-            text: completionLines.filter((line) => line !== '').join('\n'),
-          },
-          ...artifactMessages,
-        ];
-        response.meta = {
-          ...(response.meta ?? {}),
-          codexTurn: {
-            outputState: lastResult.result.outputState ?? 'complete',
-            previewText: lastResult.result.previewText ?? '',
-            finalSource: lastResult.result.finalSource ?? 'agent_job',
-            errorMessage: lastResult.result.errorMessage ?? '',
-          },
-        };
-        return response;
-      }
-      if (attempt < current.maxAttempts && lastVerification.nextAction === 'retry') {
-        this.agentJobs.markRepairing(current.id, lastVerification.summary);
-        await emitProgressUpdate(
-          options.onProgress ?? null,
-          this.t('coordinator.agent.progressRetrying', {
+        stopSession: async (nextScopeRef, nextSession) => {
+          await this.stopThreadForSession(nextScopeRef, nextSession, { waitForSettleMs: 0 });
+        },
+        verifyJob: async (liveJob, result, liveSession) => this.verifyAgentJob(liveJob, result, liveSession),
+        progressText: {
+          running: (attempt, maxAttempts) => this.t('coordinator.agent.progressRunning', {
+            title: current.title,
+            attempt,
+            max: maxAttempts,
+          }),
+          verifying: () => this.t('coordinator.agent.progressVerifying', {
             title: current.title,
           }),
-          'commentary',
-        );
-        continue;
-      }
+          retrying: () => this.t('coordinator.agent.progressRetrying', {
+            title: current.title,
+          }),
+        },
+        now: this.now,
+        onProgress: options.onProgress ?? null,
+        onApprovalRequest: options.onApprovalRequest ?? null,
+      });
+    } catch (error) {
+      const message = formatUserError(error);
       this.agentJobs.failJob(current.id, {
-        error: lastVerification.summary,
-        resultPreview,
-        verificationSummary: lastVerification.summary,
+        error: message,
       });
       return messageResponse([
         this.t('coordinator.agent.failed'),
-        this.t('coordinator.agent.title', { value: current.title }),
-        this.t('coordinator.agent.verification', { value: lastVerification.summary }),
-        ...(lastVerification.issues.length > 0
-          ? [
-            this.t('coordinator.agent.issuesTitle'),
-            ...lastVerification.issues.map((issue) => `- ${issue}`),
-          ]
-          : []),
-        this.t('coordinator.agent.retryHint'),
-      ], buildSessionMeta(lastSession));
+        this.t('coordinator.agent.lastError', { value: message }),
+      ], buildSessionMeta(session));
     }
-    const fallbackSummary = this.t('coordinator.agent.maxAttemptsReached');
-    this.agentJobs.failJob(current.id, {
-      error: fallbackSummary,
-      resultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
-      verificationSummary: lastVerification?.summary ?? fallbackSummary,
-    });
+
+    const completed = missionRun.finalJob;
+    const finalSession = missionRun.finalSession ?? session;
+    const finalBridgeResult = missionRun.finalBridgeResult;
+    const statusLabel = formatAgentStatusLabel(completed.status, completed.running, this.currentI18n);
+    const verificationSummary = completed.verificationSummary
+      ?? completed.lastError
+      ?? missionRun.runResult.mission.statusReason
+      ?? statusLabel;
+
+    if (missionRun.runResult.mission.status === 'completed') {
+      const artifacts = this.resolveAgentJobArtifacts(completed);
+      const resultText = completed.resultText ?? completed.lastResultPreview ?? '';
+      const response = messageResponse([], buildSessionMeta(finalSession));
+      const completionLines = [
+        this.t('coordinator.agent.completed'),
+        this.t('coordinator.agent.title', { value: completed.title }),
+        this.t('coordinator.agent.verification', { value: truncateText(verificationSummary, 180) }),
+      ];
+      if (artifacts.length > 0) {
+        completionLines.push(this.t('coordinator.agent.attachmentSending', { count: artifacts.length }));
+      } else if (resultText) {
+        completionLines.push('');
+        completionLines.push(resultText);
+      }
+      response.messages = [
+        {
+          text: completionLines.filter((line) => line !== '').join('\n'),
+        },
+        ...artifacts.map((artifact) => ({
+          artifact,
+          mediaPath: artifact.path,
+          caption: artifact.caption ?? artifact.displayName ?? null,
+        })),
+      ];
+      response.meta = {
+        ...(response.meta ?? {}),
+        codexTurn: {
+          outputState: finalBridgeResult?.outputState ?? 'complete',
+          previewText: finalBridgeResult?.previewText ?? completed.lastResultPreview ?? '',
+          finalSource: finalBridgeResult?.finalSource ?? 'agent_job_mission_control',
+          errorMessage: finalBridgeResult?.errorMessage ?? '',
+        },
+      };
+      return response;
+    }
+
+    if (missionRun.runResult.mission.status === 'stopped') {
+      return messageResponse([
+        this.t('coordinator.agent.stopped'),
+        this.t('coordinator.agent.title', { value: completed.title }),
+      ], buildSessionMeta(finalSession));
+    }
+
+    if (
+      missionRun.runResult.mission.status === 'waiting_user'
+      || missionRun.runResult.mission.status === 'needs_human'
+      || missionRun.runResult.mission.status === 'handoff'
+      || missionRun.runResult.mission.status === 'blocked'
+    ) {
+      return messageResponse([
+        this.t('coordinator.agent.paused'),
+        this.t('coordinator.agent.title', { value: completed.title }),
+        this.t('coordinator.agent.status', { value: statusLabel }),
+        this.t('coordinator.agent.verification', { value: verificationSummary }),
+      ], buildSessionMeta(finalSession));
+    }
+
+    const verifierIssues = missionRun.runResult.verifierResult?.missingAcceptanceCriteria ?? [];
     return messageResponse([
       this.t('coordinator.agent.failed'),
-      this.t('coordinator.agent.lastError', { value: fallbackSummary }),
-    ], buildSessionMeta(lastSession));
+      this.t('coordinator.agent.title', { value: completed.title }),
+      this.t('coordinator.agent.verification', { value: verificationSummary }),
+      ...(verifierIssues.length > 0
+        ? [
+          this.t('coordinator.agent.issuesTitle'),
+          ...verifierIssues.map((issue) => `- ${issue}`),
+        ]
+        : []),
+      this.t('coordinator.agent.retryHint'),
+    ], buildSessionMeta(finalSession));
   }
 
   async verifyAgentJob(job: AgentJob, result, session): Promise<AgentVerificationResult> {

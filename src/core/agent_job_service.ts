@@ -53,6 +53,12 @@ export class AgentJobService {
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
+  listAllJobs(): AgentJob[] {
+    return this.agentJobs
+      .list()
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
   getById(id: string): AgentJob | null {
     return this.agentJobs.getById(id);
   }
@@ -132,6 +138,7 @@ export class AgentJobService {
       missionWorkpadLatestVerifierSummary: null,
       missionWorkpadFinalResultSummary: null,
       missionAttemptHistory: [],
+      missionRuntimeState: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -184,6 +191,7 @@ export class AgentJobService {
       missionWorkpadLatestBlocker: null,
       missionWorkpadLatestVerifierSummary: null,
       missionWorkpadFinalResultSummary: null,
+      missionRuntimeState: null,
     });
   }
 
@@ -452,7 +460,20 @@ function appendAttemptHistoryEntry(
 
 function normalizeAgentJobStatus(value: unknown): AgentJobStatus {
   const normalized = String(value ?? '').trim().toLowerCase();
-  if (normalized === 'queued' || normalized === 'planning' || normalized === 'running' || normalized === 'verifying' || normalized === 'repairing' || normalized === 'completed' || normalized === 'failed' || normalized === 'stopped') {
+  if (
+    normalized === 'queued'
+    || normalized === 'planning'
+    || normalized === 'running'
+    || normalized === 'verifying'
+    || normalized === 'repairing'
+    || normalized === 'waiting_user'
+    || normalized === 'needs_human'
+    || normalized === 'handoff'
+    || normalized === 'blocked'
+    || normalized === 'completed'
+    || normalized === 'failed'
+    || normalized === 'stopped'
+  ) {
     return normalized;
   }
   return 'queued';
