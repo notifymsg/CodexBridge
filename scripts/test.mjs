@@ -6,9 +6,12 @@ const distTestDir = path.join(process.cwd(), 'dist', 'test');
 fs.rmSync(distTestDir, { recursive: true, force: true });
 
 const LIVE_AGENT_TEST_ENV_FLAG = 'CODEXBRIDGE_TEST_ALLOW_LIVE_AGENT';
+const LIVE_OPENAI_COMPATIBLE_TEST_ENV_FLAG = 'CODEXBRIDGE_TEST_LIVE_OPENAI_COMPATIBLE';
 const isolatedEnv = { ...process.env };
+const allowLiveAgent = isolatedEnv[LIVE_AGENT_TEST_ENV_FLAG] === '1';
+const allowLiveOpenAICompatible = isolatedEnv[LIVE_OPENAI_COMPATIBLE_TEST_ENV_FLAG] === '1';
 
-if (isolatedEnv[LIVE_AGENT_TEST_ENV_FLAG] !== '1') {
+if (!allowLiveAgent && !allowLiveOpenAICompatible) {
   for (const key of [
     'CODEXBRIDGE_AGENT_API_KEY',
     'CODEXBRIDGE_AGENT_BASE_URL',
@@ -19,6 +22,21 @@ if (isolatedEnv[LIVE_AGENT_TEST_ENV_FLAG] !== '1') {
     'OPENAI_API_BASE_URL',
     'OPENAI_MODEL',
     'MINIMAX_API_KEY',
+    'MINIMAX_BASE_URL',
+    'MINIMAX_MODEL',
+    'DEEPSEEK_API_KEY',
+    'DEEPSEEK_BASE_URL',
+    'DEEPSEEK_MODEL',
+    'DEEPSEEK_DEFAULT_MODEL',
+    'QWEN_API_KEY',
+    'QWEN_BASE_URL',
+    'QWEN_MODEL',
+    'DASHSCOPE_API_KEY',
+    'DASHSCOPE_BASE_URL',
+    'DASHSCOPE_MODEL',
+    'OPENROUTER_API_KEY',
+    'OPENROUTER_BASE_URL',
+    'OPENROUTER_MODEL',
   ]) {
     delete isolatedEnv[key];
   }

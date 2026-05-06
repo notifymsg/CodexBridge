@@ -196,6 +196,9 @@ Phase 4 package contract suite:
 - [x] Covered local compact fallback output
 - [x] Covered multimodal downgrade for unsupported image and file input
 - [x] Phase 4 full verification run on 2026-05-06: `responses-adapter:check-boundary`, `responses-adapter:typecheck`, `responses-adapter:test`, `responses-adapter:build`, OpenAI-compatible adapter/server/config/plugin/WebSocket repair tests, root `typecheck`, root `build`, and `git diff --check`
+- [x] Refactored live-provider smoke tests to load the real CodexBridge provider profiles via `loadCodexProfilesFromEnv()` before starting the local Responses adapter server
+- [x] Added `pnpm run test:live-openai-compatible` as the explicit gated live smoke entrypoint
+- [x] Profile-based live smoke harness verification run on 2026-05-06: default test path skips safely; gated path also skips when current shell has no DeepSeek, MiniMax, Qwen/DashScope, or OpenRouter profile env
 - [ ] Phase 4 live provider smoke tests through real CodexBridge profiles remain pending after package checks pass
 
 Reference usage:
@@ -254,6 +257,7 @@ import, and model capability metadata.
 - [x] Add explicit `*_REQUEST_RETRY` and `*_RETRY_STATUSES` transient upstream retry support
 - [x] Add generic translator repairs for MiniMax consecutive tool calls, iFlow boolean thinking flags, and Kimi upstream model alias rewrite
 - [x] Add gated live-provider smoke tests for DeepSeek, MiniMax, Qwen, and OpenRouter
+- [x] Route gated live-provider smoke tests through the CodexBridge provider profile loader instead of hand-written provider specs
 - [x] Validate DeepSeek against the real upstream API through the local Responses adapter
 - [x] Port CLIProxyAPI WebSocket transcript/tool-call repair into a tested local module
 - [x] Validate MiniMax against the real upstream API through the local Responses adapter

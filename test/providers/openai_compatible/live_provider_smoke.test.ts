@@ -1,75 +1,70 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getOpenAICompatibleProviderPreset } from '../../../src/providers/openai_compatible/capability_presets.js';
+import { loadCodexProfilesFromEnv } from '../../../src/providers/codex/config.js';
 import { OpenAICompatibleResponsesAdapterServer } from '../../../src/providers/openai_compatible/responses_adapter_server.js';
+import type { ProviderProfile } from '../../../src/types/provider.js';
 
 type LiveProviderSpec = {
-  presetId: string;
+  profileId: string;
   name: string;
-  apiKeyEnv: string[];
-  baseUrlEnv: string[];
-  modelEnv: string[];
-  defaultBaseUrl: string;
-  defaultModel: string;
+  apiKeyEnvHint: string[];
 };
 
 const LIVE_FLAG = process.env.CODEXBRIDGE_TEST_LIVE_OPENAI_COMPATIBLE === '1';
+const loadedProfiles = loadCodexProfilesFromEnv(process.env);
 const PROVIDERS: LiveProviderSpec[] = [{
-  presetId: 'deepseek',
+  profileId: 'deepseek',
   name: 'DeepSeek',
-  apiKeyEnv: ['DEEPSEEK_API_KEY'],
-  baseUrlEnv: ['DEEPSEEK_BASE_URL'],
-  modelEnv: ['DEEPSEEK_DEFAULT_MODEL', 'DEEPSEEK_MODEL'],
-  defaultBaseUrl: 'https://api.deepseek.com',
-  defaultModel: 'deepseek-chat',
+  apiKeyEnvHint: ['DEEPSEEK_API_KEY'],
 }, {
-  presetId: 'minimax',
+  profileId: 'minimax',
   name: 'MiniMax',
-  apiKeyEnv: ['MINIMAX_API_KEY', 'CODEXBRIDGE_AGENT_API_KEY'],
-  baseUrlEnv: ['MINIMAX_BASE_URL', 'CODEXBRIDGE_AGENT_BASE_URL'],
-  modelEnv: ['MINIMAX_MODEL', 'CODEXBRIDGE_AGENT_MODEL'],
-  defaultBaseUrl: 'https://api.minimaxi.com/v1',
-  defaultModel: 'MiniMax-M2.7',
+  apiKeyEnvHint: ['MINIMAX_API_KEY'],
 }, {
-  presetId: 'qwen',
+  profileId: 'qwen',
   name: 'Qwen',
-  apiKeyEnv: ['QWEN_API_KEY', 'DASHSCOPE_API_KEY'],
-  baseUrlEnv: ['QWEN_BASE_URL', 'DASHSCOPE_BASE_URL'],
-  modelEnv: ['QWEN_MODEL', 'DASHSCOPE_MODEL'],
-  defaultBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  defaultModel: 'qwen-plus',
+  apiKeyEnvHint: ['QWEN_API_KEY', 'DASHSCOPE_API_KEY'],
 }, {
-  presetId: 'openrouter',
+  profileId: 'openrouter',
   name: 'OpenRouter',
-  apiKeyEnv: ['OPENROUTER_API_KEY'],
-  baseUrlEnv: ['OPENROUTER_BASE_URL'],
-  modelEnv: ['OPENROUTER_MODEL'],
-  defaultBaseUrl: 'https://openrouter.ai/api/v1',
-  defaultModel: 'openai/gpt-4o-mini',
+  apiKeyEnvHint: ['OPENROUTER_API_KEY'],
 }];
 
 for (const provider of PROVIDERS) {
-  const resolved = resolveProvider(provider);
+  const resolved = resolveProviderFromCodexBridgeProfile(provider);
   test(`live OpenAI-compatible adapter smoke: ${provider.name}`, {
     skip: skipReason(provider, resolved),
     timeout: 90_000,
   }, async () => {
-    const preset = getOpenAICompatibleProviderPreset(provider.presetId);
+    assert.ok(resolved.profile);
     const server = new OpenAICompatibleResponsesAdapterServer({
       apiKey: resolved.apiKey,
       upstreamBaseUrl: resolved.baseUrl,
       defaultModel: resolved.model,
-      models: [{ id: resolved.model }],
+      models: resolved.models,
       providerName: provider.name,
-      providerKind: 'openai-compatible',
+      providerKind: resolved.profile.providerKind,
       fetchImpl: ((input, init) => fetch(input, {
         ...init,
         signal: AbortSignal.timeout(60_000),
       })) as typeof fetch,
-      providerCapabilities: preset.capabilities,
+      providerCapabilities: resolved.capabilities,
+      upstreamChatCompletionsPath: resolved.upstreamChatCompletionsPath,
+      ownedBy: resolved.ownedBy,
     });
     await server.start();
     try {
+      const modelsResponse = await fetch(`${server.baseUrl}/v1/models`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const modelsBody = await modelsResponse.json() as any;
+      assert.equal(modelsResponse.status, 200);
+      assert.equal(
+        normalizeArray(modelsBody?.data).some((model) => normalizeString(model?.id) === resolved.model),
+        true,
+        `${provider.name} profile model catalog did not expose ${resolved.model}`,
+      );
+
       const response = await fetch(`${server.baseUrl}/v1/responses`, {
         method: 'POST',
         headers: {
@@ -98,34 +93,43 @@ function skipReason(provider: LiveProviderSpec, resolved: ResolvedProvider): str
   if (!LIVE_FLAG) {
     return 'set CODEXBRIDGE_TEST_LIVE_OPENAI_COMPATIBLE=1 to run live provider smoke tests';
   }
+  if (!resolved.profile) {
+    return `missing CodexBridge provider profile: ${provider.profileId}; set ${provider.apiKeyEnvHint.join(' or ')}`;
+  }
   if (!resolved.apiKey) {
-    return `missing API key env: ${provider.apiKeyEnv.join(' or ')}`;
+    return `missing API key env: ${resolved.apiKeyEnv || provider.apiKeyEnvHint.join(' or ')}`;
   }
   return false;
 }
 
 type ResolvedProvider = {
+  profile: ProviderProfile | null;
+  apiKeyEnv: string;
   apiKey: string;
   baseUrl: string;
   model: string;
+  models: any[];
+  capabilities: any;
+  upstreamChatCompletionsPath: string | null;
+  ownedBy: string | null;
 };
 
-function resolveProvider(provider: LiveProviderSpec): ResolvedProvider {
+function resolveProviderFromCodexBridgeProfile(provider: LiveProviderSpec): ResolvedProvider {
+  const profile = loadedProfiles.profiles.find((entry) => entry.id === provider.profileId) ?? null;
+  const config = profile?.config as Record<string, any> | undefined;
+  const apiKeyEnv = normalizeString(config?.apiKeyEnv);
+  const model = normalizeString(config?.defaultModel);
   return {
-    apiKey: firstEnv(provider.apiKeyEnv),
-    baseUrl: firstEnv(provider.baseUrlEnv) || provider.defaultBaseUrl,
-    model: firstEnv(provider.modelEnv) || provider.defaultModel,
+    profile,
+    apiKeyEnv,
+    apiKey: apiKeyEnv ? normalizeString(process.env[apiKeyEnv]) : '',
+    baseUrl: normalizeString(config?.baseUrl),
+    model,
+    models: normalizeArray(config?.modelCatalog).length > 0 ? normalizeArray(config?.modelCatalog) : [{ id: model }],
+    capabilities: config?.capabilities ?? null,
+    upstreamChatCompletionsPath: normalizeString(config?.upstreamChatCompletionsPath) || null,
+    ownedBy: normalizeString(config?.ownedBy) || null,
   };
-}
-
-function firstEnv(names: string[]): string {
-  for (const name of names) {
-    const value = normalizeString(process.env[name]);
-    if (value) {
-      return value;
-    }
-  }
-  return '';
 }
 
 function collectResponseOutputText(response: any): string {
@@ -142,4 +146,8 @@ function collectResponseOutputText(response: any): string {
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeArray(value: unknown): any[] {
+  return Array.isArray(value) ? value : [];
 }
