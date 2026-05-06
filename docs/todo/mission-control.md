@@ -44,7 +44,9 @@ It should own:
 - run / verify / repair / retry loop
 - persisted attempts, events, workpad, and runner leases
 - provider abstraction
-- stop / retry / approve / resume control actions
+- stop / retry / resume control actions
+- pending-approval / handoff state modeling and future provider-neutral
+  approval control hooks
 
 It should **not** own:
 
@@ -414,6 +416,16 @@ single Mission Control-backed state view so that:
 - existing `/agent result` fallback still backfills the compatibility record
   when only a preview copy was cached locally
 
+Phase 6d landed: package-owned retry snapshot helpers now back `/agent retry`
+so that:
+
+- queued retry state is derived from `@codexbridge/mission-control` instead of
+  bridge-local reset logic
+- retry keeps stable mission/workspace/thread identity while clearing stale
+  attempts, events, verifier summaries, and result state before requeueing
+- provider-native in-turn approval replies remain a host concern until the
+  package grows a provider-neutral approval reply control port
+
 Completion criteria:
 
 - [x] `/agent` remains the Mission v0 surface
@@ -422,6 +434,10 @@ Completion criteria:
 
 Phase 6 source-of-truth tests:
 
+- `packages/mission-control/test/control_actions.test.ts`
+  - `createMissionRetrySnapshot clears runtime history but preserves stable mission context`
+  - `createMissionResumeSnapshot re-queues waiting missions without discarding accumulated context`
+  - `json repository resetMission replaces the mission snapshot and clears attempts and events for that mission`
 - `test/core/bridge_coordinator.test.ts`
   - `/agent drafts, confirms, runs, verifies, and records a background job`
   - `/agent stores generated attachments and can resend them`

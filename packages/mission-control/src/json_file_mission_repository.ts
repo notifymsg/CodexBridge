@@ -42,6 +42,14 @@ export class JsonFileMissionRepository implements MissionRepository {
     })).missions.find((entry) => entry.id === mission.id) ?? mission;
   }
 
+  resetMission(mission: Mission): Mission {
+    return this.updateState((state) => ({
+      missions: upsertById(state.missions, mission),
+      attempts: state.attempts.filter((attempt) => attempt.missionId !== mission.id),
+      events: state.events.filter((event) => event.missionId !== mission.id),
+    })).missions.find((entry) => entry.id === mission.id) ?? mission;
+  }
+
   getAttemptById(id: string): MissionAttempt | null {
     return this.loadState().attempts.find((attempt) => attempt.id === id) ?? null;
   }

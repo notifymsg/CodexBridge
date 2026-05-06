@@ -19,7 +19,8 @@ This package is intended to own only mission-runtime behavior:
 - provider abstraction
 - run / verify / repair / retry loop
 - attempts, events, workpad, and runner state persistence
-- stop / retry / approve / resume control actions
+- stop plus retry/resume requeue control actions
+- pending-approval and handoff state modeling
 
 It must not own bridge behavior:
 
@@ -29,6 +30,8 @@ It must not own bridge behavior:
 - bridge sessions or thread browsing UX
 - approvals as chat wording or UI policy
 - assistant records, automations, uploads, or artifact delivery policy
+- provider-native in-turn approval replies before a provider-neutral approval
+  control port exists
 
 Current phase:
 
@@ -37,8 +40,9 @@ Current phase:
   attempt prompt contract, workpad status rendering helpers, deterministic
   workspace assignment, recovery-safe lease coordination, provider port,
   `CodexMissionProvider` adapter shell, verifier/budget/repair-prompt
-  primitives, and a repository-backed bounded mission runtime that drives
-  continuation, repair/retry, verifier authority, and stop/interrupt control
+  primitives, package-owned retry/resume snapshot helpers, and a
+  repository-backed bounded mission runtime that drives continuation,
+  repair/retry, verifier authority, and stop/interrupt control
 
 This package should preserve the Symphony-style separation between:
 

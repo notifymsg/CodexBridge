@@ -5,6 +5,7 @@ export interface MissionRepository {
   listMissions(): Mission[];
   listResumableMissions(now?: number): Mission[];
   saveMission(mission: Mission): Mission;
+  resetMission(mission: Mission): Mission;
 
   getAttemptById(id: string): MissionAttempt | null;
   listAttempts(missionId: string): MissionAttempt[];
@@ -13,4 +14,3 @@ export interface MissionRepository {
   listEvents(missionId: string): MissionEvent[];
   appendEvent(event: MissionEvent): MissionEvent;
 }
-

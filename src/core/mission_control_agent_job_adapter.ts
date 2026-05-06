@@ -2,6 +2,8 @@ import {
   MissionWorkflowLoader,
   createMission,
   createMissionAttemptPromptContract,
+  createMissionRetrySnapshot,
+  createMissionResumeSnapshot,
   createMissionWorkpadStatusView,
   renderMissionAttemptPromptContract,
   transitionMission,
@@ -222,6 +224,51 @@ export function createFreshMissionRuntimeStateForAgentJob(
     }),
     attempts: [],
     events: [],
+  };
+}
+
+export function createRetriedMissionRuntimeStateForAgentJob(
+  job: AgentJob,
+  options: {
+    now?: number;
+    codexThreadId?: string | null;
+  } = {},
+): AgentJobMissionRuntimeStateView {
+  const state = loadAgentJobMissionRuntimeState(job);
+  if (!state.mission) {
+    return createFreshMissionRuntimeStateForAgentJob(job, options);
+  }
+  const now = options.now ?? Date.now();
+  return {
+    mission: createMissionRetrySnapshot(state.mission, {
+      at: now,
+      codexThreadId: options.codexThreadId ?? state.mission.codexThreadId,
+      reason: 'Agent mission re-queued through Mission Control retry.',
+    }),
+    attempts: [],
+    events: [],
+  };
+}
+
+export function createResumedMissionRuntimeStateForAgentJob(
+  job: AgentJob,
+  options: {
+    reason?: string | null;
+    now?: number;
+  } = {},
+): AgentJobMissionRuntimeStateView | null {
+  const state = loadAgentJobMissionRuntimeState(job);
+  if (!state.mission) {
+    return null;
+  }
+  const now = options.now ?? Date.now();
+  return {
+    mission: createMissionResumeSnapshot(state.mission, {
+      at: now,
+      reason: options.reason,
+    }),
+    attempts: state.attempts.map((attempt) => cloneValue(attempt)),
+    events: state.events.map((event) => cloneValue(event)),
   };
 }
 

@@ -44,6 +44,7 @@ export * from './prompt_contract.js';
 export * from './workpad_view.js';
 export * from './workspace.js';
 export * from './lease_coordinator.js';
+export * from './control_actions.js';
 export * from './provider.js';
 export * from './codex_provider.js';
 export * from './verifier.js';

@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import { NotFoundError } from './errors.js';
 import {
-  createFreshMissionRuntimeStateForAgentJob,
   createMissionControlledAgentJobView,
+  createRetriedMissionRuntimeStateForAgentJob,
   createStoppedMissionRuntimeStateForAgentJob,
   serializeAgentJobMissionRuntimeState,
 } from './mission_control_agent_job_adapter.js';
@@ -192,7 +192,7 @@ export class AgentJobService {
 
   retryJob(id: string): AgentJob {
     const current = this.requireById(id);
-    const resetState = createFreshMissionRuntimeStateForAgentJob(current, {
+    const resetState = createRetriedMissionRuntimeStateForAgentJob(current, {
       now: this.now(),
       codexThreadId: this.getSession(current)?.codexThreadId ?? null,
     });
