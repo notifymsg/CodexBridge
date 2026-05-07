@@ -1834,6 +1834,11 @@ Current implementation note:
   source-sync command before the first attempt begins, so hosts do not need to
   patch authoritative mission/checklist/work-item records directly just to keep
   queued source metadata aligned
+- CodexBridge host runtimes now recover stale missions and discover resumable
+  `/agent` work through package-owned supervision rather than resetting bridge
+  projections and only scanning host-local queued jobs, which makes external
+  `loop.sh`-style supervision an operational fallback instead of a structural
+  runtime dependency
 - `waiting_user`, `needs_human`, `handoff`, and similar paused states remain
   first-class runtime states, but they are not auto-resumed by supervision
   without an explicit host control action such as resume/retry

@@ -4,6 +4,7 @@ import {
   createManualWorkItemSourceSummary,
   createWorkItemSourceSummary,
   DirectMissionControlApi,
+  MissionSupervisor,
   transitionMission,
   type Mission,
   type MissionRepository,
@@ -45,6 +46,11 @@ interface AgentJobServiceOptions {
   missionRepository?: MissionRepository | null;
   now?: () => number;
   locale?: string | null;
+}
+
+export interface AgentJobMissionSupervisionRecoveryResult {
+  recoveredMissionIds: string[];
+  stoppedMissionIds: string[];
 }
 
 export class AgentJobService {
@@ -303,6 +309,30 @@ export class AgentJobService {
     this.agentJobs.delete(id);
   }
 
+  recoverSupervisableMissions(): AgentJobMissionSupervisionRecoveryResult {
+    this.ensureMissionRecordsForJobs(this.agentJobs.list());
+    const supervisor = this.createMissionSupervisor();
+    const now = this.now();
+    return {
+      recoveredMissionIds: supervisor.recoverStaleMissions(now).map((mission) => mission.id),
+      stoppedMissionIds: supervisor.reconcileStopRequestedMissions('agent-job-service', now)
+        .map((mission) => mission.id),
+    };
+  }
+
+  claimSupervisableJobs(platform: string, limit = 2): AgentJob[] {
+    if (limit <= 0) {
+      return [];
+    }
+    this.recoverSupervisableMissions();
+    return this.createMissionSupervisor()
+      .listSupervisableMissionIds({ now: this.now() })
+      .map((missionId) => this.agentJobs.getById(missionId))
+      .filter((job): job is AgentJob => Boolean(job) && job.platform === platform)
+      .slice(0, limit)
+      .map((job) => this.requireById(job.id));
+  }
+
   resetRunningJobs(): void {
     const now = this.now();
     for (const job of this.agentJobs.list()) {
@@ -326,6 +356,9 @@ export class AgentJobService {
   }
 
   claimQueuedJobs(platform: string, limit = 2): AgentJob[] {
+    if (this.missionAuthorityRepository) {
+      return this.claimSupervisableJobs(platform, limit);
+    }
     const now = this.now();
     const jobs = this.agentJobs
       .list()
@@ -515,6 +548,14 @@ export class AgentJobService {
   private createMissionControlApi(): DirectMissionControlApi {
     return new DirectMissionControlApi({
       repository: this.missionControlRepository,
+      now: this.now,
+    });
+  }
+
+  private createMissionSupervisor(): MissionSupervisor {
+    return new MissionSupervisor({
+      repository: this.missionControlRepository,
+      runtime: null,
       now: this.now,
     });
   }

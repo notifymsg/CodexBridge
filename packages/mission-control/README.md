@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9f-pristine-source-sync`: package-owned mission
+- `phase-9g-host-supervision-dispatch`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -57,7 +57,9 @@ Current phase:
   also be re-synced through the package command layer before the first attempt
   starts, so hosts such as CodexBridge no longer need to rewrite authoritative
   mission/work-item records directly just to keep queued source metadata in
-  sync.
+  sync. CodexBridge host runtimes now also use package-owned supervision for
+  stale mission recovery and resumable `/agent` dispatch discovery, reducing
+  `loop.sh` to an operational fallback instead of a structural runtime owner.
 
 This package should preserve the Symphony-style separation between:
 

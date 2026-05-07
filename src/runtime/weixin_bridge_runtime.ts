@@ -167,6 +167,8 @@ export class WeixinBridgeRuntime {
 
   backgroundTasks: Set<Promise<RuntimeResponse>>;
 
+  scheduledAgentJobIds: Set<string>;
+
   scopeChains: Map<string, Promise<RuntimeResponse>>;
 
   pendingInboundMerges: Map<string, PendingInboundMerge>;
@@ -217,6 +219,7 @@ export class WeixinBridgeRuntime {
     this.i18n = createI18n(locale);
     this.poller = null;
     this.backgroundTasks = new Set();
+    this.scheduledAgentJobIds = new Set();
     this.scopeChains = new Map();
     this.pendingInboundMerges = new Map();
     this.pendingScopeNotices = new Map();
@@ -230,7 +233,11 @@ export class WeixinBridgeRuntime {
   async start(): Promise<void> {
     await this.platformPlugin.start();
     this.automationJobs?.resetRunningJobs?.();
-    this.agentJobs?.resetRunningJobs?.();
+    if (typeof this.agentJobs?.recoverSupervisableMissions === 'function') {
+      this.agentJobs.recoverSupervisableMissions();
+    } else {
+      this.agentJobs?.resetRunningJobs?.();
+    }
     this.startAutomationScheduler();
     this.startInternalThreadCleanupScheduler();
     this.poller = new WeixinPoller({
@@ -1294,12 +1301,26 @@ export class WeixinBridgeRuntime {
         this.trackBackgroundTask(task);
       }
     }
-    const agentJobs = this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
+    const agentJobs = typeof this.agentJobs?.claimSupervisableJobs === 'function'
+      ? this.agentJobs.claimSupervisableJobs('weixin')
+      : this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
     if (!Array.isArray(agentJobs)) {
       return;
     }
     for (const job of agentJobs) {
-      const task = this.runAgentJob(job);
+      const jobId = typeof job?.id === 'string' ? job.id : '';
+      if (jobId && this.scheduledAgentJobIds.has(jobId)) {
+        continue;
+      }
+      if (jobId) {
+        this.scheduledAgentJobIds.add(jobId);
+      }
+      const task = this.runAgentJob(job)
+        .finally(() => {
+          if (jobId) {
+            this.scheduledAgentJobIds.delete(jobId);
+          }
+        });
       this.trackBackgroundTask(task);
     }
     const reminders = this.assistantRecords?.claimDueReminders?.('weixin') ?? [];
@@ -1330,7 +1351,7 @@ export class WeixinBridgeRuntime {
   async runAgentJob(job: any): Promise<RuntimeResponse> {
     const scopeId = String(job?.externalScopeId ?? '');
     if (!scopeId || await this.isScopeBusyForAgent(job)) {
-      if (job?.id) {
+      if (job?.id && typeof this.agentJobs?.claimSupervisableJobs !== 'function') {
         this.agentJobs?.updateJob?.(job.id, {
           status: 'queued',
           running: false,

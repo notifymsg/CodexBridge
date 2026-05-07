@@ -84,7 +84,7 @@ export interface MissionSupervisorRunOptions extends MissionRunOptions {
 
 export interface MissionSupervisorOptions {
   repository: MissionRepository;
-  runtime: MissionRuntime;
+  runtime?: MissionRuntime | null;
   leaseCoordinator?: MissionLeaseCoordinator;
   now?: () => number;
 }
@@ -92,7 +92,7 @@ export interface MissionSupervisorOptions {
 export class MissionSupervisor {
   private readonly repository: MissionRepository;
 
-  private readonly runtime: MissionRuntime;
+  private readonly runtime: MissionRuntime | null;
 
   private readonly leaseCoordinator: MissionLeaseCoordinator;
 
@@ -100,7 +100,7 @@ export class MissionSupervisor {
 
   constructor({
     repository,
-    runtime,
+    runtime = null,
     leaseCoordinator = new MissionLeaseCoordinator(repository),
     now = () => Date.now(),
   }: MissionSupervisorOptions) {
@@ -208,6 +208,9 @@ export class MissionSupervisor {
   async runUntilIdle(
     options: MissionSupervisorRunOptions,
   ): Promise<MissionSupervisorRunReport> {
+    if (!this.runtime) {
+      throw new Error('MissionSupervisor requires a MissionRuntime to dispatch missions.');
+    }
     const report: MissionSupervisorRunReport = {
       stopReason: 'idle',
       recoveredMissionIds: [],

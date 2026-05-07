@@ -125,6 +125,17 @@ Main remaining integration gap:
     mission/work-item records through bridge-local repository access
   - non-pristine mission rename/update fallbacks remain transitional host
     projection behavior until more package-owned metadata edit commands land
+- Phase 9g now makes CodexBridge use package-owned supervision as the
+  authoritative recovery/discovery path for `/agent` dispatch:
+  - bridge runtime startup and periodic sweeps now recover stale missions
+    through `MissionSupervisor` instead of rewriting interrupted `AgentJob`
+    projections back to `queued`/`stopped`
+  - resumable `queued` / `verifying` / `repairing` missions are now selected
+    from the package repository instead of only from bridge-local queued-job
+    projections, so continuation no longer depends on `loop.sh`-style shell
+    ownership
+  - `AgentJob` remains a compatibility projection/cache, but it no longer
+    decides which missions are eligible for continuation after recovery
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -138,10 +149,9 @@ Main remaining integration gap:
   lifecycle truth directly
 - the next hardening work is finishing source sync/reconciliation beyond the
   current manual create path, pristine pre-attempt sync path, and first local
-  todo adapter; reducing long-lived `loop.sh` reliance to a real operational
-  fallback; and continuing to thin the remaining bridge projection seams so
-  future Telegram, CLI, or web hosts do not re-implement bridge-local runtime
-  logic
+  todo adapter; and continuing to thin the remaining bridge projection seams
+  so future Telegram, CLI, or web hosts do not re-implement bridge-local
+  runtime logic
 
 ## V0 Migration Baseline Sources
 

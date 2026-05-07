@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  InMemoryMissionRepository,
   JsonFileMissionRepository,
   MissionLeaseCoordinator,
   MissionRuntime,
@@ -91,6 +92,29 @@ function createRuntimeHarness(input: {
     leaseCoordinator,
   };
 }
+
+test('mission supervisor exposes recovery/listing without a runtime and rejects dispatch until one is supplied', async () => {
+  const now = 1_701_800_000_000;
+  const repository = new InMemoryMissionRepository();
+  const mission = createQueuedMission({
+    id: 'mission-supervision-readonly',
+    cwd: '/repo',
+    now,
+  });
+  repository.saveMission(mission);
+
+  const supervisor = new MissionSupervisor({
+    repository,
+    now: () => now,
+  });
+
+  assert.deepEqual(supervisor.listSupervisableMissionIds({ now }), [mission.id]);
+  assert.equal(supervisor.createSnapshot(mission.id)?.status, 'queued');
+  await assert.rejects(
+    supervisor.runUntilIdle({ ownerId: 'supervisor-readonly' }),
+    /requires a MissionRuntime to dispatch missions/,
+  );
+});
 
 test('mission supervisor recovers stale leases, resumes verifier state, and runs missions until idle', async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-supervision-cwd-'));

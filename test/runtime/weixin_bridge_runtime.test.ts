@@ -6,6 +6,7 @@ import { createI18n } from '../../src/i18n/index.js';
 interface RuntimeHarnessOptions {
   coordinator: any;
   automationJobs?: any;
+  agentJobs?: any;
   sendText: (payload: { externalScopeId: string; content: string }) => Promise<any> | any;
   sendMedia?: (payload: { externalScopeId: string; filePath: string; caption?: string | null }) => Promise<any> | any;
   sendTyping?: (payload: { externalScopeId: string; status: 'start' | 'stop' }) => Promise<void> | void;
@@ -22,6 +23,7 @@ interface RuntimeHarnessOptions {
 function makeRuntime({
   coordinator,
   automationJobs = null,
+  agentJobs = null,
   sendText,
   sendMedia,
   sendTyping,
@@ -78,6 +80,7 @@ function makeRuntime({
     },
     bridgeCoordinator: coordinator,
     automationJobs,
+    agentJobs,
     previewSoftTargetBytes,
     previewIntervalMs,
     typingKeepaliveMs,
@@ -748,6 +751,56 @@ test('WeixinBridgeRuntime defers due automation jobs when the scope is busy', as
   assert.equal(deferredCalls.length, 1);
   assert.equal(deferredCalls[0]?.id, 'auto-2');
   assert.equal(typeof deferredCalls[0]?.nextRunAt, 'number');
+});
+
+test('WeixinBridgeRuntime prefers supervision-backed agent scheduling and does not double-dispatch the same mission', async () => {
+  const dispatched: string[] = [];
+  let releaseAgentRun: (() => void) | null = null;
+  const agentRunGate = new Promise<void>((resolve) => {
+    releaseAgentRun = resolve;
+  });
+  const agentJob = {
+    id: 'agent-supervision-1',
+    platform: 'weixin',
+    externalScopeId: 'wxid_agent_supervision',
+    title: 'Resume verifier work',
+    cwd: '/tmp/codexbridge-agent',
+    locale: 'zh-CN',
+  };
+  const runtime = makeRuntime({
+    agentJobs: {
+      recoverSupervisableMissions() {
+        return {
+          recoveredMissionIds: ['agent-supervision-1'],
+          stoppedMissionIds: [],
+        };
+      },
+      claimSupervisableJobs() {
+        return [agentJob];
+      },
+      claimQueuedJobs() {
+        throw new Error('legacy claimQueuedJobs path should not be used');
+      },
+    },
+    sendText: async () => {},
+    coordinator: {
+      async reconcileActiveTurn() {
+        return null;
+      },
+      async runAgentJob(job: any) {
+        dispatched.push(job.id);
+        await agentRunGate;
+        return completeResponse('Mission resumed from supervision.');
+      },
+    },
+  });
+
+  await runtime.runAutomationSweep();
+  await runtime.runAutomationSweep();
+  assert.deepEqual(dispatched, ['agent-supervision-1']);
+
+  releaseAgentRun?.();
+  await runtime.waitForIdle();
 });
 
 test('WeixinBridgeRuntime sends artifact-based response messages through platform sendMedia', async () => {

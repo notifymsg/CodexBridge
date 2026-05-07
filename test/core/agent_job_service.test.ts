@@ -171,6 +171,144 @@ test('AgentJobService createJob seeds a manual source-backed mission while keepi
   assert.equal(events[1]?.summary, 'Agent mission queued through the bridge adapter.');
 });
 
+test('AgentJobService claimSupervisableJobs recovers stale mission authority and returns resumable verifier work', () => {
+  const nowRef = { value: 1_701_100_000_000 };
+  const bridgeSession: BridgeSession = {
+    id: 'session-agent-service-supervision',
+    providerProfileId: 'codex-default',
+    codexThreadId: 'thread-agent-service-supervision',
+    cwd: '/repo',
+    title: 'Mission session',
+    createdAt: nowRef.value - 1_000,
+    updatedAt: nowRef.value - 500,
+  };
+  const missionRepository = new InMemoryMissionRepository();
+  const service = new AgentJobService({
+    agentJobs: new InMemoryAgentJobRepository(),
+    missionRepository,
+    bridgeSessions: {
+      getSessionById(bridgeSessionId: string) {
+        return bridgeSessionId === bridgeSession.id ? bridgeSession : null;
+      },
+    },
+    now: () => nowRef.value,
+  });
+
+  const staleJob = service.createJob({
+    scopeRef: {
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-service-stale',
+    },
+    title: 'Recover stale queued work',
+    originalInput: '/agent recover stale mission',
+    goal: 'Resume the stale mission from authoritative state.',
+    expectedOutput: 'A recovered mission summary.',
+    plan: ['Recover stale state'],
+    category: 'code',
+    riskLevel: 'medium',
+    mode: 'codex',
+    providerProfileId: 'codex-default',
+    bridgeSessionId: bridgeSession.id,
+    cwd: '/repo',
+    locale: 'zh-CN',
+    maxAttempts: 2,
+  });
+  nowRef.value += 10;
+  const verifyingJob = service.createJob({
+    scopeRef: {
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-service-verifying',
+    },
+    title: 'Resume verifier work',
+    originalInput: '/agent resume verifier',
+    goal: 'Continue verification from authoritative state.',
+    expectedOutput: 'A verified repair summary.',
+    plan: ['Resume verifier state'],
+    category: 'code',
+    riskLevel: 'medium',
+    mode: 'codex',
+    providerProfileId: 'codex-default',
+    bridgeSessionId: bridgeSession.id,
+    cwd: '/repo',
+    locale: 'zh-CN',
+    maxAttempts: 2,
+  });
+
+  const staleQueued = missionRepository.getMissionById(staleJob.id);
+  assert.ok(staleQueued);
+  const staleRunning = transitionMission(staleQueued, 'running', {
+    at: nowRef.value + 40,
+    activeAttemptId: 'attempt-agent-service-stale',
+    reason: 'Mission was interrupted mid-run.',
+  });
+  staleRunning.lease = {
+    ownerId: 'worker-stale',
+    acquiredAt: nowRef.value + 20,
+    heartbeatAt: nowRef.value + 30,
+    expiresAt: nowRef.value + 39,
+    releasedAt: null,
+  };
+  missionRepository.saveMission(staleRunning);
+
+  const verifyingQueued = missionRepository.getMissionById(verifyingJob.id);
+  assert.ok(verifyingQueued);
+  const verifyingRunning = transitionMission(verifyingQueued, 'running', {
+    at: nowRef.value + 50,
+    activeAttemptId: 'attempt-agent-service-verifying',
+    reason: 'Provider produced a candidate patch.',
+    lastResultPreview: 'Candidate patch is ready for verification.',
+  });
+  const verifyingMission = transitionMission(verifyingRunning, 'verifying', {
+    at: nowRef.value + 60,
+    activeAttemptId: 'attempt-agent-service-verifying',
+    reason: 'Verifier should resume from persisted state.',
+    lastResultPreview: 'Candidate patch is ready for verification.',
+  });
+  verifyingMission.lease = {
+    ownerId: 'worker-verifying',
+    acquiredAt: nowRef.value + 40,
+    heartbeatAt: nowRef.value + 50,
+    expiresAt: nowRef.value + 59,
+    releasedAt: null,
+  };
+  missionRepository.saveMission(verifyingMission);
+  missionRepository.saveAttempt({
+    id: 'attempt-agent-service-verifying',
+    missionId: verifyingMission.id,
+    generationId: verifyingMission.activeGenerationId,
+    generationIndex: verifyingMission.activeGenerationIndex,
+    checklistSnapshotId: verifyingMission.currentChecklistSnapshotId,
+    index: 1,
+    status: 'verifying',
+    providerRunId: 'run-agent-service-verifying',
+    providerThreadId: bridgeSession.codexThreadId,
+    promptDigest: 'digest-agent-service-verifying',
+    verifierVerdict: null,
+    verifierSummary: 'Verifier work should resume from authoritative state.',
+    missingAcceptanceCriteria: [],
+    outputPreview: 'Candidate patch is ready for verification.',
+    error: null,
+    startedAt: nowRef.value + 50,
+    endedAt: null,
+    createdAt: nowRef.value + 50,
+    updatedAt: nowRef.value + 60,
+  });
+
+  nowRef.value += 100;
+
+  const recovery = service.recoverSupervisableMissions();
+  const claimed = service.claimSupervisableJobs('weixin', 10);
+
+  assert.deepEqual(recovery.recoveredMissionIds, [staleJob.id, verifyingJob.id]);
+  assert.deepEqual(recovery.stoppedMissionIds, []);
+  assert.deepEqual(claimed.map((job) => job.id), [staleJob.id, verifyingJob.id]);
+  assert.equal(missionRepository.getMissionById(staleJob.id)?.status, 'queued');
+  assert.equal(missionRepository.getMissionById(verifyingJob.id)?.status, 'verifying');
+  assert.equal(service.requireById(staleJob.id).status, 'queued');
+  assert.equal(service.requireById(verifyingJob.id).status, 'verifying');
+  assert.equal(service.requireById(verifyingJob.id).running, true);
+});
+
 test('AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions', () => {
   const now = 1_701_100_000_000;
   const service = makeAgentJobService(now, {

@@ -731,6 +731,15 @@ the first attempt starts, while preserving mission identity and host bindings.
 CodexBridge queued `/agent rename` now uses that command when possible so the
 authoritative mission/work-item path stays inside the package boundary.
 
+Phase 9g landed: CodexBridge host runtimes now use package-owned mission
+supervision for stale recovery and resumable `/agent` dispatch discovery
+instead of resetting host projections and only re-claiming `queued` bridge
+jobs. `MissionSupervisor` recovery/listing no longer requires a full runtime
+instance, stale `running` missions can be re-queued from authoritative mission
+truth, stale `verifying` / `repairing` missions remain discoverable for resume,
+and local host scheduling keeps `loop.sh` as an operational fallback instead
+of a structural source of run ownership.
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
@@ -750,7 +759,7 @@ authoritative mission/work-item path stays inside the package boundary.
   - [x] stale-run recovery
   - [x] history retention
   - [x] checkpoint/continuation semantics
-- [ ] Reduce long-lived reliance on external `loop.sh` to an operational
+- [x] Reduce long-lived reliance on external `loop.sh` to an operational
   fallback once package supervision exists
 
 Completion criteria:
@@ -759,7 +768,7 @@ Completion criteria:
   assuming a chat-only origin
 - [x] The runtime can recover, continue, and report progress using package-owned
   supervision semantics
-- [ ] External shell supervision is optional, not structurally required
+- [x] External shell supervision is optional, not structurally required
 
 ## Phase 10: Service Exposure and Additional Hosts
 
