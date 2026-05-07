@@ -620,7 +620,14 @@ now accept that host-neutral surface without bridge-specific field names, and
 package/core adapter tests prove the same contract can be consumed outside a
 CodexBridge-only naming scheme.
 
-Phase 9j is the current validated baseline, but several behaviors above are
+Phase 9k landed: a package-only host-neutral integration proof now creates,
+runs, queries, and streams a CLI-shaped mission through the generic
+`hostSessionId` / `providerThreadId` contract plus `MissionHostAdapter`
+without importing CodexBridge runtime code. Later hosts can therefore validate
+the same mission core behavior through package-owned APIs instead of requiring
+bridge-specific naming or runner logic.
+
+Phase 9k is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
@@ -630,8 +637,7 @@ still transitional:
 - source-backed mission sync now reaches the initial manual create path, a
   pristine pre-attempt refresh path with authoritative lineage retention, and a
   first assistant-record-backed `local-todo` adapter, but broader source
-  sync/reconciliation and proof that a later non-CodexBridge host can consume
-  the same package contract still belong to the unfinished backlog
+  sync/reconciliation still belongs to the unfinished backlog
 
 ## Phase 7: Checklist-First Domain Hardening
 
@@ -856,6 +862,6 @@ Mission Control is ready for broader extraction when:
 - [x] `AgentJob` is only a rebuildable host projection/cache, not mission truth
 - [x] package-owned commands/queries/streams are enough for a host to observe
   and control missions
-- [ ] a later Telegram, web, or other host surface can integrate without
+- [x] a later Telegram, web, or other host surface can integrate without
   changing mission core behavior
 - [x] `/auto` remains fully outside Mission Control ownership

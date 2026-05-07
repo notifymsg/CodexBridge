@@ -167,6 +167,14 @@ Main remaining integration gap:
   - the bridge can therefore keep migrating toward a host adapter/projection
     role without forcing future Telegram, CLI, or service wrappers to speak
     CodexBridge-specific field names at the package boundary
+- Phase 9k now proves that later hosts can consume that same package contract
+  without inheriting bridge runtime logic:
+  - a package-only CLI/manual host proof now creates, runs, queries, and
+    streams a mission through the generic `hostSessionId` /
+    `providerThreadId` boundary plus `MissionHostAdapter`
+  - the proof does not import CodexBridge runtime/store/i18n layers, so the
+    same mission core behavior is now validated outside the `/agent`
+    integration path
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -180,10 +188,8 @@ Main remaining integration gap:
   lifecycle truth directly
 - the next hardening work is wiring broader source sync/reconciliation triggers
   beyond the current manual create path, append-oriented pristine pre-attempt
-  sync path, and first local todo adapter; continuing to shrink `AgentJob`
-  compatibility caches; and proving that a later Telegram, CLI, or web host
-  can consume those same package-owned read/control contracts without
-  re-implementing bridge-local runtime logic
+  sync path, and first local todo adapter; and continuing to shrink `AgentJob`
+  compatibility caches
 
 ## V0 Migration Baseline Sources
 

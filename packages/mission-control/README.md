@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9j-host-neutral-contract`: package-owned mission
+- `phase-9k-host-neutral-proof`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -71,7 +71,10 @@ Current phase:
   The outward-facing host-binding contract now also prefers generic
   `hostSessionId` / `providerThreadId` fields while keeping
   `bridgeSessionId` / `codexThreadId` as compatibility aliases during the
-  CodexBridge migration.
+  CodexBridge migration. A package-only host-neutral proof now also exercises
+  create/run/query/stream flows with a CLI-shaped host adapter using those
+  generic bindings, so later hosts can consume the same mission core without
+  requiring CodexBridge-specific runtime glue.
 
 This package should preserve the Symphony-style separation between:
 
