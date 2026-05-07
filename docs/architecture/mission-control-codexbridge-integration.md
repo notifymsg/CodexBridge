@@ -49,7 +49,7 @@ Current code already has a real Mission Control package/runtime boundary:
 - `AgentJob`: current bridge-side compatibility record that projects Mission
   Control state back onto the existing `/agent` surface
 
-Main remaining integration gap:
+Current convergence status:
 
 - the unified `Mission` model now exists inside
   `@codexbridge/mission-control`
@@ -256,13 +256,13 @@ Main remaining integration gap:
   persists through the package-owned progress sink so mission workpad/timeline
   state can retain bridge-delivered progress without letting the host mutate
   lifecycle truth directly
-- the next hardening work is wiring broader source sync/reconciliation triggers
-  beyond the current manual create path, append-oriented pristine pre-attempt
-  sync path, and first local todo adapter; continuing to shrink `AgentJob`
-  compatibility caches; and later deciding how much of provider-native in-turn
-  approval reply handling should move from today’s host-owned live `/allow`
-  flow into a future package-neutral control port without breaking the current
-  host adapter boundary
+- the first-host `/agent` surface now has package-backed prompt/checklist
+  confirmation, paused-state continuation, plan-change resolution, loop
+  snapshot, and supervision semantics, so the Mission Control/CodexBridge v0
+  integration boundary is intentionally stable
+- broader issue/board sources, service exposure, and later providers remain
+  explicitly deferred; they should not reopen bridge-owned runtime truth or
+  weaken the current package/host adapter split when work resumes
 
 ## V0 Migration Baseline Sources
 
@@ -429,15 +429,12 @@ Important clarification:
 
 ## Practical Next Step
 
-The immediate useful next step is to keep hardening the Mission Control package
-boundary, not to jump to later providers or a web UI.
+The useful next step is no longer more Phase 9 bridge convergence work. Keep
+the current package/host split stable, and only reopen Mission Control work
+for one of these explicit re-entry scopes:
 
-Current focus:
-
-1. Keep `packages/mission-control` as the single owner of mission state,
-   workflow policy, verifier authority, and retry/resume semantics.
-2. Keep bridge integrations thin so `/agent` stays the Mission v0 surface
-   instead of becoming the runtime owner again.
-3. Improve future-host readiness through package-owned control helpers and
-   adapter seams, while deferring GitHub/Linear sources, optional web UI, and
-   later providers.
+1. `Phase 10` service exposure on top of the existing package-owned
+   `commands / queries / streams` contract.
+2. Later work-item sources such as GitHub/Linear once they are back in scope.
+3. Later providers that can honor the same durable runtime contract without
+   pulling runtime ownership back into CodexBridge.

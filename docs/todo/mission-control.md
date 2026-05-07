@@ -872,6 +872,14 @@ approval summaries plus approve/reject/input hints, and `/agent confirm` can
 resolve those paused approval/input cases without flattening them into a
 generic resume-only flow.
 
+Phase 9r landed: the formal Mission Control architecture and CodexBridge
+integration docs now match the concrete package contract for confirmation,
+paused-state, and loop-budget lifecycle control. The package-backed runtime
+keeps `draft`/`awaiting_*`/`queued` start gates, treats `handoff` as an
+explicit paused mission state, uses `queued` as the package-owned continuation
+boundary between accepted cycles, and documents the shipped
+`commands / queries / streams` surface instead of older placeholder names.
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
@@ -919,7 +927,6 @@ generic resume-only flow.
   cases that need more than a simple resume signal
 - [x] Let the first host start and continue a checklist-backed looping mission
   without external `loop.sh` as the primary user-facing control surface
-- [ ] Support future issue/board integrations
 - [x] Keep external checklist/source truth separate from internal immutable
   `ChecklistSnapshot` runtime copies
 - [x] Add restricted provider/agent progress update paths for workpad/progress
@@ -942,7 +949,7 @@ Completion criteria:
 - [x] The runtime can recover, continue, and report progress using package-owned
   supervision semantics
 - [x] External shell supervision is optional, not structurally required
-- [ ] The concrete package commands/status model converges with the formal spec
+- [x] The concrete package commands/status model converges with the formal spec
   for confirmation, paused-state, and loop-budget lifecycle control
 - [x] A first host can require explicit `immutablePrompt` plus initial
   checklist confirmation before the first autonomous cycle starts
@@ -977,6 +984,8 @@ Provider expansion:
 
 Source expansion:
 
+- [ ] future issue/board integrations beyond the current manual + local-todo
+  adapters
 - [ ] GitHub issues
 - [ ] Linear issues
 - [ ] assistant-record promotion
@@ -999,13 +1008,13 @@ Mission Control is ready for broader extraction when:
 - [x] a later Telegram, web, or other host surface can integrate without
   changing mission core behavior
 - [x] `/auto` remains fully outside Mission Control ownership
-- [ ] the concrete package API/state machine matches the formal spec for
+- [x] the concrete package API/state machine matches the formal spec for
   `startMission`, approval / plan-change resolution, snapshot streaming, and
   confirmation/budget states
 - [x] the first host can persist and confirm an immutable prompt plus initial
   checklist before autonomous looping begins
 - [x] the first host can render package-owned loop snapshots and resolve
-  `PlanChangeRequest` / `waiting_user` / `needs_human` without shell-log
+  `PlanChangeRequest` / `waiting_user` / `needs_human` / `handoff` without shell-log
   inspection
 - [x] the first host can drive a checklist-backed looping mission as product
   UX without depending on external `loop.sh`

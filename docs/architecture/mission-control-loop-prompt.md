@@ -13,11 +13,15 @@ without forcing `.codexbridge/` runtime assets into version control.
 
 This prompt is intentionally scoped to the current Mission Control baseline:
 
-- phases `0-6` are the validated baseline
-- current implementation focus is `Phase 7`, `Phase 8`, and `Phase 9`
+- phases `0-9` are the validated baseline
+- `Phase 10` service exposure and later providers/sources remain deferred
 - `/auto` is out of scope
 - `CodexBridge` integration cleanup around `/agent` remains an explicit part of
-  the current work, not a hidden side effect
+  the completed baseline, not a hidden side effect
+
+The embedded prompt below should now be treated as a re-entry prompt for the
+pre-`Phase 10` convergence work. Do not reuse it unless that earlier scope is
+explicitly reopened.
 
 ## Canonical Prompt
 

@@ -723,6 +723,87 @@ continuation: allow
   );
 });
 
+test('mission runtime persists provider-directed handoff as an explicit paused state with a handoff event', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-handoff-cwd-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-handoff-state-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-handoff-root-'));
+  writeWorkflow(cwd, `
+version: 1
+maxTurns: 4
+maxAttempts: 2
+continuation: allow
+`);
+  const repo = new JsonFileMissionRepository(stateDir);
+  const nowRef = { value: 1_700_830_150_000 };
+
+  const provider: MissionProvider = {
+    kind: 'fake-provider',
+    async start() {
+      return {
+        providerRunId: 'run-handoff-1',
+        providerThreadId: 'thread-handoff-1',
+      };
+    },
+    async continue() {
+      throw new Error('continuation should not run in the handoff test');
+    },
+    async wait() {
+      nowRef.value += 100;
+      return {
+        outcome: 'blocked',
+        text: 'Execution must be handed off to the release manager for the deploy window.',
+        artifacts: [],
+        previewText: 'Release-manager handoff required.',
+        errorMessage: null,
+        requiresHuman: false,
+        handoffState: 'handoff',
+        continuationEligible: false,
+        stopReason: 'Hand off to the release manager before production deploy.',
+        rawState: 'handoff',
+      };
+    },
+    async interrupt() {},
+  };
+
+  const verifier: MissionVerifier = {
+    async verify() {
+      throw new Error('verify should not be called when the provider requests a handoff');
+    },
+  };
+
+  const mission = createQueuedMission({
+    id: 'mission-runtime-handoff',
+    cwd,
+    now: nowRef.value,
+  });
+  repo.saveMission(mission);
+
+  const runtime = createRuntimeHarness({
+    repository: repo,
+    provider,
+    verifier,
+    rootDir,
+    nowRef,
+    ids: ['attempt-runtime-handoff-1'],
+  });
+  const result = await runtime.runMission(mission.id, {
+    ownerId: 'worker-runtime-handoff',
+    readOnly: true,
+    allowSharedCwd: true,
+  });
+
+  assert.equal(result.mission.status, 'handoff');
+  assert.equal(result.mission.statusReason, 'Hand off to the release manager before production deploy.');
+  assert.equal(result.latestCycleResult?.status, 'handoff');
+  assert.equal(result.latestCycleResult?.stage, 'provider.terminal');
+  assert.equal(result.latestCycleResult?.blocker, 'Hand off to the release manager before production deploy.');
+  assert.equal(result.attempt?.status, 'handoff');
+  assert.equal(result.providerResult?.handoffState, 'handoff');
+
+  const eventKinds = repo.listEvents(mission.id).map((event) => event.kind);
+  assert.ok(eventKinds.includes('mission.handoff'));
+});
+
 test('mission runtime materializes max_loops_reached before opening another cycle beyond loopPolicy.maxCycles', async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-max-cycles-cwd-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-max-cycles-state-'));
