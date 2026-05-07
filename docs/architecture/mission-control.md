@@ -1530,6 +1530,11 @@ Temporary external supervisor scripts may still exist as migration tooling or
 operational fallback, but the target architecture is for Mission Control itself
 to own supervision, recovery, and observability semantics.
 
+The current tracked loop prompt used by that migration-era external supervisor
+is versioned in
+[`mission-control-loop-prompt.md`](./mission-control-loop-prompt.md) and
+mirrored locally into `.codexbridge/mission/mission-control.prompt.md`.
+
 ### 5.6.5 Interface Contract
 
 Mission Control should expose the same conceptual API whether used by direct

@@ -84,6 +84,18 @@ Live phase/checklist status belongs to `docs/todo/mission-control.md`.
 The architecture phases below should stay aligned with the implemented package
 state instead of acting as a second stale TODO list.
 
+Important clarification:
+
+- the numbered slices below describe integration architecture and migration
+  order
+- they are **not** the authoritative current execution phase numbers for the
+  loop
+- current execution priorities remain the `Phase 7` / `Phase 8` / `Phase 9`
+  backlog in `docs/todo/mission-control.md`
+- if this document's older numbered slices and the TODO document ever seem to
+  conflict, treat `docs/todo/mission-control.md` as the active execution
+  source of truth
+
 ### Phase 0: Baseline current `/agent` behavior
 
 - treat current `/agent` user-visible behavior as migration-protected
@@ -156,6 +168,9 @@ state instead of acting as a second stale TODO list.
 - absorb the useful operational pieces of `loop.sh` into Mission Control:
   status snapshots, stop markers, history logs, stale-run recovery, and bounded
   supervision semantics
+- keep the tracked external loop prompt aligned with
+  `docs/architecture/mission-control-loop-prompt.md` while that migration-era
+  supervisor still exists
 
 ### Phase 6: CodexBridge integration
 

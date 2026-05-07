@@ -6,6 +6,8 @@ This document tracks the implementation backlog for
 It is the execution-oriented companion to:
 
 - `docs/architecture/mission-control.md`
+- `docs/architecture/mission-control-codexbridge-integration.md`
+- `docs/architecture/mission-control-loop-prompt.md`
 - `docs/todo/roadmap.md`
 
 ## Track Branch
@@ -20,6 +22,8 @@ Expected file ownership for this branch:
 
 - `packages/mission-control/**`
 - `docs/architecture/mission-control.md`
+- `docs/architecture/mission-control-codexbridge-integration.md`
+- `docs/architecture/mission-control-loop-prompt.md`
 - `docs/todo/mission-control.md`
 - mission-control-specific integration files when they are introduced
 
@@ -57,6 +61,47 @@ It should **not** own:
 - assistant-record storage as a separate product concern
 - provider-profile CLI management
 - bridge i18n and command aliasing
+
+## Locked End State
+
+The architecture is now locked by:
+
+- `docs/architecture/mission-control.md`
+- `docs/architecture/mission-control-codexbridge-integration.md`
+
+These are no longer open product questions for the current loop:
+
+- [x] Mission Control is `WorkItem`-centered, not prompt-centered
+- [x] `Mission` is anchored to a stable `workItemId`, not to a chat thread or
+  host session id
+- [x] `Mission` keeps fixed `immutableGoal`, fixed `immutablePrompt`, loop
+  policy, and an active checklist version reference
+- [x] checklist truth may live in an external source, but Mission Control keeps
+  immutable `ChecklistSnapshot` versions for replay/recovery
+- [x] `Checklist`, `ChecklistItem`, `ChecklistSnapshot`,
+  `PlanChangeRequest`, `CycleResult`, and `MissionGeneration` are target
+  first-class runtime models
+- [x] package-owned `commands / queries / streams` are the canonical API
+  boundary
+- [x] direct in-process function calls come first; network service exposure is
+  a later wrapper
+- [x] `Connect RPC` is the preferred later network transport, not a current
+  blocker
+- [x] `AgentJob` is only a host-side compatibility projection during migration,
+  not the authoritative mission store
+- [x] `/auto` is scheduler-owned host functionality and is out of Mission
+  Control scope
+- [x] `loop.sh` is a migration-era external supervisor; its useful supervision
+  semantics should converge into package-owned runtime behavior over time
+
+## Current Baseline
+
+Phases 0-6 established the package, Codex provider, verifier loop, workspace
+identity, and `/agent` baseline integration.
+
+That baseline is useful, but it is **not** the final target shape.
+The remaining work is to converge the current implementation toward the
+host-neutral architecture locked in the two architecture documents above.
 
 ## Reference Stack
 
@@ -464,22 +509,118 @@ that:
   - `pnpm test --test-name-pattern "Mission Control|WORKFLOW\\.md|interrupted provider turn|normal partial provider exit|approval requests" test/core/bridge_coordinator.test.ts`
   - `pnpm test --test-name-pattern "AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions|AgentJobService retryJob still clears runtime history for fresh reruns" test/core/agent_job_service.test.ts`
 
-## Phase 7: Optional Web Surface
+Phase 6 is the current validated baseline, but several behaviors above are still
+transitional:
 
-Only after chat control is solid:
+- `AgentJob` still carries bridge-side compatibility state that should keep
+  shrinking toward a pure projection/cache
+- fresh rerun behavior still reflects the older reset-style baseline instead of
+  the final generation/lineage model
+- `/agent` reads still need to move further toward package-owned
+  command/query/timeline contracts
 
-- [ ] Add a mission list page
-- [ ] Add mission detail page with workpad and attempt history
-- [ ] Add manual operator actions:
-  - retry
-  - stop
-  - approve
-  - archive
-- [ ] Read/write the same persisted mission records used by chat
+## Phase 7: Checklist-First Domain Hardening
 
-Guardrail:
+- [ ] Add first-class `WorkItem` domain modeling distinct from host job/thread
+  ids
+- [ ] Add first-class `Checklist`, `ChecklistSnapshot`, and `ChecklistItem`
+  models
+- [ ] Add `PlanChangeRequest` so AI-proposed checklist changes become explicit
+  versioned requests instead of implicit prompt drift
+- [ ] Add fixed `immutableGoal`, fixed `immutablePrompt`, and explicit
+  `loopPolicy` fields to the authoritative mission model
+- [ ] Add a typed `CycleResult` contract as the package-owned loop protocol
+- [ ] Add `MissionGeneration`/run lineage so fresh reruns no longer clear prior
+  history
+- [ ] Move completion semantics to:
+  - all checklist items complete
+  - final goal verified
 
-- [ ] The web UI must not become the source of truth for mission state
+Completion criteria:
+
+- [ ] Mission truth no longer depends on legacy "one prompt, one job" mental
+  models
+- [ ] Item-level verifier outcomes can drive continuation, repair, waiting, or
+  completion without host-local heuristics
+- [ ] Fresh reruns preserve prior mission history through generation/lineage
+  instead of destructive reset
+
+## Phase 8: Host-Neutral API and Projection Cleanup
+
+- [ ] Define the canonical package-owned `commands / queries / streams`
+  contract
+- [ ] Keep direct in-process function calls as the first concrete
+  implementation of that contract
+- [ ] Add boundary metadata:
+  - `requestId`
+  - `correlationId`
+  - `idempotencyKey`
+- [ ] Add package-owned query shapes for:
+  - mission summary/workpad
+  - mission timeline/history
+  - mission attempts
+  - execution refs / host bindings / artifact refs
+- [ ] Add explicit host adapter boundaries for session/thread/approval/artifact
+  delivery/notification/auth context
+- [ ] Move `/agent` reads and control actions further onto package-owned query
+  and command contracts
+- [ ] Keep stripping bridge-owned runtime truth out of `AgentJob` until it is a
+  projection/cache only
+- [x] Keep `/auto` entirely outside Mission Control ownership
+
+Completion criteria:
+
+- [ ] CodexBridge can render and control mission state without reconstructing
+  truth from compatibility blobs
+- [ ] `AgentJob` can be treated as a rebuildable host projection rather than an
+  authoritative store
+- [ ] host-specific command names remain outside the package contract
+
+## Phase 9: Work Item Sources and Runtime Supervision
+
+- [ ] Add `WorkItemSourceAdapter` as the source abstraction
+- [ ] Support source-backed work items such as:
+  - local todo/checklist
+  - manual host-created work items
+  - future issue/board integrations
+- [ ] Keep external checklist/source truth separate from internal immutable
+  `ChecklistSnapshot` runtime copies
+- [ ] Add restricted provider/agent progress update paths for workpad/progress
+  reporting without lifecycle-state mutation
+- [ ] Add package-owned supervision semantics that absorb the useful parts of
+  `loop.sh`:
+  - status snapshots
+  - stop markers / stop intents
+  - bounded supervision loops
+  - stale-run recovery
+  - history retention
+  - checkpoint/continuation semantics
+- [ ] Reduce long-lived reliance on external `loop.sh` to an operational
+  fallback once package supervision exists
+
+Completion criteria:
+
+- [ ] Mission Control can consume and track source-backed work items without
+  assuming a chat-only origin
+- [ ] The runtime can recover, continue, and report progress using package-owned
+  supervision semantics
+- [ ] External shell supervision is optional, not structurally required
+
+## Phase 10: Service Exposure and Additional Hosts
+
+- [ ] Wrap the same package-owned contract in a later service layer
+- [ ] Prefer `Connect RPC` for network command/query/stream exposure
+- [ ] Keep one canonical request/response schema across function calls and
+  service exposure
+- [ ] Map mission event/snapshot subscriptions to streaming transport
+- [ ] Let later Telegram/web/CLI/API hosts consume the same mission core
+  without changing package behavior
+
+Guardrails:
+
+- [ ] Service exposure must not fork the package API into a second runtime
+  contract
+- [ ] A future web UI must not become the source of truth for mission state
 
 ## Later Providers and Sources
 
@@ -505,5 +646,11 @@ Mission Control is ready for broader extraction when:
 - [x] Restart recovery works for queued/running/verifying missions
 - [x] `/agent` uses the mission runtime without host-owned runner logic
 - [x] The package has no imports from platform/runtime/i18n command code
-- [ ] A later Telegram, web, or other host surface can integrate without changing mission
-  core behavior
+- [ ] `WorkItem`/checklist/generation semantics are authoritative runtime
+  models instead of host-local conventions
+- [ ] `AgentJob` is only a rebuildable host projection/cache, not mission truth
+- [ ] package-owned commands/queries/streams are enough for a host to observe
+  and control missions
+- [ ] a later Telegram, web, or other host surface can integrate without
+  changing mission core behavior
+- [x] `/auto` remains fully outside Mission Control ownership
