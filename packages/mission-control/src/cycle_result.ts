@@ -1,6 +1,7 @@
 import type { MissionVerifierResult } from './verifier.js';
 import type {
   ChecklistItem,
+  ChecklistItemKind,
   ChecklistItemStatus,
   ChecklistSnapshot,
   Mission,
@@ -53,6 +54,15 @@ export interface ChecklistProgressSummary {
   activeItemStatus: ChecklistItemStatus | null;
   completedItemCount: number;
   totalItemCount: number;
+}
+
+export interface ChecklistItemSelectorOptions {
+  preferredKinds?: ChecklistItemKind[];
+}
+
+export interface ApplyMissionChecklistResultOptions {
+  activeItemId?: string | null;
+  markRemainingComplete?: boolean;
 }
 
 export interface CreateMissionCycleResultInput {
@@ -132,7 +142,9 @@ export function summarizeChecklistSnapshotProgress(
   const actionableItems = snapshot.items.filter((item) => item.status !== 'skipped');
   const totalItemCount = actionableItems.length;
   const completedItemCount = actionableItems.filter((item) => item.status === 'completed').length;
-  const activeItem = actionableItems.find((item) => item.status !== 'completed');
+  const activeItem = getActiveChecklistItem(snapshot, {
+    preferredKinds: ['acceptance'],
+  });
   return {
     overallCompletion: totalItemCount > 0
       ? Math.round((completedItemCount / totalItemCount) * 100)
@@ -148,27 +160,63 @@ export function applyMissionVerifierResultToChecklistSnapshot(
   snapshot: ChecklistSnapshot,
   result: Pick<MissionVerifierResult, 'verdict' | 'summary' | 'missingAcceptanceCriteria'>,
   now = Date.now(),
+  options: ApplyMissionChecklistResultOptions = {},
 ): ChecklistSnapshot {
+  const activeItem = resolveActiveChecklistItem(snapshot, options.activeItemId);
+  if (!activeItem) {
+    if (result.verdict === 'complete' && options.markRemainingComplete) {
+      return completeChecklistSnapshot(snapshot, result.summary, now);
+    }
+    return {
+      ...snapshot,
+      updatedAt: now,
+    };
+  }
+
+  if (result.verdict === 'complete' && options.markRemainingComplete) {
+    return completeChecklistSnapshot(snapshot, result.summary, now);
+  }
+
   if (result.verdict === 'complete') {
     return {
       ...snapshot,
-      items: snapshot.items.map((item) => markChecklistItemCompleted(item, result.summary, now)),
+      items: snapshot.items.map((item) => item.id === activeItem.id
+        ? markChecklistItemCompleted(item, result.summary, now)
+        : { ...item }),
       updatedAt: now,
     };
   }
 
   const missingCriteria = normalizeStringSet(result.missingAcceptanceCriteria);
+  const pendingStatus = resolveIncompleteChecklistStatus(result.verdict);
   if (missingCriteria.size === 0) {
     return {
       ...snapshot,
+      items: snapshot.items.map((item) => item.id === activeItem.id
+        ? {
+          ...item,
+          status: pendingStatus,
+          completionSummary: null,
+          completedAt: null,
+        }
+        : { ...item }),
       updatedAt: now,
     };
   }
 
-  const blockedStatus: ChecklistItemStatus = result.verdict === 'repair' ? 'pending' : 'blocked';
   return {
     ...snapshot,
     items: snapshot.items.map((item) => {
+      if (activeItem.kind !== 'acceptance') {
+        return item.id === activeItem.id
+          ? {
+            ...item,
+            status: pendingStatus,
+            completionSummary: null,
+            completedAt: null,
+          }
+          : { ...item };
+      }
       if (item.kind !== 'acceptance') {
         return { ...item };
       }
@@ -176,13 +224,44 @@ export function applyMissionVerifierResultToChecklistSnapshot(
       if (missingCriteria.has(key)) {
         return {
           ...item,
-          status: blockedStatus,
+          status: pendingStatus,
           completionSummary: null,
           completedAt: null,
         };
       }
       return markChecklistItemCompleted(item, 'Verified in the latest mission cycle.', now);
     }),
+    updatedAt: now,
+  };
+}
+
+export function getActiveChecklistItem(
+  snapshot: ChecklistSnapshot | null,
+  options: ChecklistItemSelectorOptions = {},
+): ChecklistItem | null {
+  if (!snapshot) {
+    return null;
+  }
+  const preferredKinds = options.preferredKinds ?? [];
+  for (const kind of preferredKinds) {
+    const matched = snapshot.items.find((item) => item.kind === kind && isIncompleteChecklistItem(item));
+    if (matched) {
+      return matched;
+    }
+  }
+  return snapshot.items.find((item) => isIncompleteChecklistItem(item)) ?? null;
+}
+
+export function completeChecklistSnapshot(
+  snapshot: ChecklistSnapshot,
+  summary: string,
+  now = Date.now(),
+): ChecklistSnapshot {
+  return {
+    ...snapshot,
+    items: snapshot.items.map((item) => isIncompleteChecklistItem(item)
+      ? markChecklistItemCompleted(item, summary, now)
+      : { ...item }),
     updatedAt: now,
   };
 }
@@ -311,6 +390,34 @@ function markChecklistItemCompleted(
     completionSummary: normalizeText(item.completionSummary) ?? normalizeText(summary),
     completedAt: item.completedAt ?? now,
   };
+}
+
+function resolveActiveChecklistItem(
+  snapshot: ChecklistSnapshot,
+  activeItemId: string | null | undefined,
+): ChecklistItem | null {
+  const explicit = typeof activeItemId === 'string'
+    ? snapshot.items.find((item) => item.id === activeItemId) ?? null
+    : null;
+  if (explicit) {
+    return explicit;
+  }
+  return getActiveChecklistItem(snapshot, {
+    preferredKinds: ['acceptance'],
+  });
+}
+
+function resolveIncompleteChecklistStatus(
+  verdict: MissionVerifierResult['verdict'],
+): ChecklistItemStatus {
+  if (verdict === 'blocked' || verdict === 'failed') {
+    return 'blocked';
+  }
+  return 'pending';
+}
+
+function isIncompleteChecklistItem(item: ChecklistItem): boolean {
+  return item.status !== 'completed' && item.status !== 'skipped';
 }
 
 function normalizeMissionControlOutcome(

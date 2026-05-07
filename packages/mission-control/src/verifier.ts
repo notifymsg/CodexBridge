@@ -1,7 +1,15 @@
 import { createMissionAttemptPromptContract, renderMissionAttemptPromptContract } from './prompt_contract.js';
 import { transitionMission } from './state_machine.js';
 import type { MissionProviderResult } from './provider.js';
-import type { Mission, MissionAttempt, MissionStatus, MissionVerifierVerdict, MissionWorkpad } from './types.js';
+import type {
+  ChecklistItem,
+  ChecklistSnapshot,
+  Mission,
+  MissionAttempt,
+  MissionStatus,
+  MissionVerifierVerdict,
+  MissionWorkpad,
+} from './types.js';
 import type { LoadedMissionWorkflow } from './workflow.js';
 
 const MISSION_VERIFIER_VERDICTS = [
@@ -19,6 +27,8 @@ const MISSION_VERIFIER_VERDICT_SET = new Set<MissionVerifierVerdict>(MISSION_VER
 export interface MissionVerifierInput {
   mission: Mission;
   attempt: MissionAttempt;
+  checklistSnapshot: ChecklistSnapshot | null;
+  activeChecklistItem: ChecklistItem | null;
   workflow: LoadedMissionWorkflow;
   providerResult: MissionProviderResult;
   attemptCount: number;
@@ -65,6 +75,7 @@ export interface MissionVerifierBudgetUsage {
 export interface CreateMissionRepairPromptInput {
   mission: Mission;
   attempt: MissionAttempt;
+  checklistSnapshot?: ChecklistSnapshot | null;
   workflow: LoadedMissionWorkflow;
   verifierResult: Pick<MissionVerifierResult, 'summary' | 'missingAcceptanceCriteria'>;
 }
@@ -210,6 +221,7 @@ export function createMissionRepairPrompt(input: CreateMissionRepairPromptInput)
     mission: input.mission,
     attempt: input.attempt,
     workflow: input.workflow,
+    checklistSnapshot: input.checklistSnapshot ?? null,
   }));
   const lines = [
     basePrompt,

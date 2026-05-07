@@ -32,6 +32,8 @@ function writeWorkflow(cwd: string, frontMatter = ''): string {
 function createQueuedMission(params: {
   id: string;
   cwd: string;
+  expectedOutput?: string;
+  acceptanceCriteria?: string[];
   maxAttempts?: number;
   maxTurns?: number;
   now: number;
@@ -43,8 +45,8 @@ function createQueuedMission(params: {
     externalScopeId: `${params.id}-scope`,
     title: `Mission ${params.id}`,
     goal: 'Repair the bug and prove the fix.',
-    expectedOutput: 'A verified mission result.',
-    acceptanceCriteria: ['Patch exists', 'Tests prove the fix'],
+    expectedOutput: params.expectedOutput ?? 'A verified mission result.',
+    acceptanceCriteria: params.acceptanceCriteria ?? ['Patch exists', 'Tests prove the fix'],
     providerProfileId: 'codex-default',
     cwd: params.cwd,
     maxAttempts: params.maxAttempts ?? 2,
@@ -152,6 +154,7 @@ continuation: allow
       nowRef.value += 50;
       if (verifierCalls === 1) {
         assert.equal(input.attemptCount, 1);
+        assert.equal(input.activeChecklistItem?.title, 'Tests prove the fix');
         return createMissionVerifierResult({
           verdict: 'repair',
           summary: 'The patch exists, but test evidence is still missing.',
@@ -159,6 +162,7 @@ continuation: allow
         });
       }
       assert.equal(input.attemptCount, 2);
+      assert.equal(input.activeChecklistItem?.title, 'Tests prove the fix');
       return createMissionVerifierResult({
         verdict: 'complete',
         summary: 'Acceptance criteria satisfied with test evidence.',
@@ -169,6 +173,7 @@ continuation: allow
   const mission = createQueuedMission({
     id: 'mission-runtime-repair',
     cwd,
+    acceptanceCriteria: ['Tests prove the fix'],
     maxAttempts: 3,
     maxTurns: 4,
     now: nowRef.value,
@@ -205,6 +210,125 @@ continuation: allow
   const eventKinds = repo.listEvents(mission.id).map((event) => event.kind);
   assert.ok(eventKinds.includes('mission.retrying'));
   assert.ok(eventKinds.includes('mission.completed'));
+  const finalChecklistSnapshot = repo.getChecklistSnapshotById(result.mission.currentChecklistSnapshotId);
+  assert.equal(finalChecklistSnapshot?.items.every((item) => item.status === 'completed'), true);
+});
+
+test('mission runtime advances to the next checklist item when verifier feedback only blocks later acceptance criteria', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-item-advance-cwd-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-item-advance-state-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-item-advance-root-'));
+  writeWorkflow(cwd, `
+version: 1
+maxTurns: 4
+maxAttempts: 3
+continuation: allow
+`);
+  const repo = new JsonFileMissionRepository(stateDir);
+  const nowRef = { value: 1_700_805_000_000 };
+  const prompts: string[] = [];
+
+  const provider: MissionProvider = {
+    kind: 'fake-provider',
+    async start(input) {
+      prompts.push(input.promptText);
+      return {
+        providerRunId: `run-item-advance-${prompts.length}`,
+        providerThreadId: 'thread-runtime-item-advance',
+      };
+    },
+    async continue() {
+      throw new Error('continuation should not run in the item-advance test');
+    },
+    async wait(runId) {
+      nowRef.value += 100;
+      if (runId === 'run-item-advance-1') {
+        return {
+          outcome: 'completed',
+          text: 'Patched the preview flow but still need to rerun tests.',
+          artifacts: [],
+          previewText: 'Patched the preview flow.',
+          errorMessage: null,
+          requiresHuman: false,
+          handoffState: null,
+          continuationEligible: true,
+          stopReason: null,
+          rawState: 'complete',
+        };
+      }
+      return {
+        outcome: 'completed',
+        text: 'Reran the failing tests and confirmed the preview fix.',
+        artifacts: [],
+        previewText: 'Tests reran cleanly.',
+        errorMessage: null,
+        requiresHuman: false,
+        handoffState: null,
+        continuationEligible: true,
+        stopReason: null,
+        rawState: 'complete',
+      };
+    },
+    async interrupt() {},
+  };
+
+  let verifierCalls = 0;
+  const verifier: MissionVerifier = {
+    async verify(input) {
+      verifierCalls += 1;
+      nowRef.value += 50;
+      if (verifierCalls === 1) {
+        assert.equal(input.activeChecklistItem?.title, 'Patch exists');
+        return createMissionVerifierResult({
+          verdict: 'repair',
+          summary: 'Patch exists, but test evidence is still missing.',
+          missingAcceptanceCriteria: ['Tests prove the fix'],
+        });
+      }
+      assert.equal(input.activeChecklistItem?.title, 'Tests prove the fix');
+      return createMissionVerifierResult({
+        verdict: 'complete',
+        summary: 'Acceptance criteria satisfied with fresh test evidence.',
+      });
+    },
+  };
+
+  const mission = createQueuedMission({
+    id: 'mission-runtime-item-advance',
+    cwd,
+    maxAttempts: 3,
+    maxTurns: 4,
+    now: nowRef.value,
+  });
+  repo.saveMission(mission);
+
+  const runtime = createRuntimeHarness({
+    repository: repo,
+    provider,
+    verifier,
+    rootDir,
+    nowRef,
+    ids: ['attempt-runtime-item-advance-1', 'attempt-runtime-item-advance-2'],
+  });
+  const result = await runtime.runMission(mission.id, {
+    ownerId: 'worker-runtime-item-advance',
+  });
+
+  assert.equal(result.mission.status, 'completed');
+  assert.deepEqual(result.cycleResults.map((cycle) => cycle.status), ['continue', 'done']);
+  assert.equal(result.latestCycleResult?.status, 'done');
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0] ?? '', /Current checklist item: \[acceptance\] Patch exists/);
+  assert.match(prompts[1] ?? '', /Current checklist item: \[acceptance\] Tests prove the fix/);
+  assert.doesNotMatch(prompts[1] ?? '', /Verifier repair contract/);
+
+  const attempts = repo.listAttempts(mission.id).sort((left, right) => left.index - right.index);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0]?.status, 'completed');
+  assert.equal(attempts[0]?.verifierVerdict, 'repair');
+  assert.equal(attempts[1]?.status, 'completed');
+  assert.equal(attempts[1]?.verifierVerdict, 'complete');
+
   const finalChecklistSnapshot = repo.getChecklistSnapshotById(result.mission.currentChecklistSnapshotId);
   assert.equal(finalChecklistSnapshot?.items.every((item) => item.status === 'completed'), true);
 });
@@ -289,6 +413,7 @@ continuation: allow
   const mission = createQueuedMission({
     id: 'mission-runtime-continue',
     cwd,
+    acceptanceCriteria: ['Patch exists'],
     maxAttempts: 2,
     maxTurns: 3,
     now: nowRef.value,

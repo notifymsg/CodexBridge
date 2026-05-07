@@ -7,6 +7,7 @@ import {
   normalizeCodexMissionDriverResult,
   normalizeMissionRecord,
   transitionMission,
+  type ChecklistItem,
   type ChecklistSnapshot,
   type Mission,
   type MissionAttempt,
@@ -586,6 +587,8 @@ class BridgeMissionVerifier implements MissionVerifier {
   async verify(input: {
     mission: Mission;
     attempt: MissionAttempt;
+    checklistSnapshot: ChecklistSnapshot | null;
+    activeChecklistItem: ChecklistItem | null;
     providerResult: MissionProviderResult;
   }): Promise<MissionVerifierResult> {
     await this.options.hostAdapter.publishProgress({

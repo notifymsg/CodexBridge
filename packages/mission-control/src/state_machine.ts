@@ -20,7 +20,7 @@ export const MISSION_STATUS_TRANSITIONS: Readonly<Record<MissionStatus, readonly
   queued: ['planning', 'running', 'stopped', 'archived'],
   planning: ['queued', 'running', 'blocked', 'failed', 'stopped'],
   running: ['verifying', 'repairing', 'waiting_user', 'needs_human', 'handoff', 'blocked', 'failed', 'stopped'],
-  verifying: ['repairing', 'completed', 'failed', 'waiting_user', 'needs_human', 'handoff', 'blocked', 'stopped'],
+  verifying: ['queued', 'repairing', 'completed', 'failed', 'waiting_user', 'needs_human', 'handoff', 'blocked', 'stopped'],
   repairing: ['queued', 'running', 'waiting_user', 'needs_human', 'handoff', 'blocked', 'failed', 'stopped'],
   waiting_user: ['queued', 'running', 'stopped', 'archived'],
   needs_human: ['queued', 'running', 'stopped', 'archived'],

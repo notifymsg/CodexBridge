@@ -8,6 +8,7 @@ import {
   MissionWorkflowLoader,
   createMission,
   createMissionAttemptPromptContract,
+  createMissionChecklistSnapshot,
   createMissionWorkpadStatusView,
   renderMissionAttemptPromptContract,
   renderMissionWorkpadStatusView,
@@ -145,19 +146,28 @@ Prefer small, verifiable changes and report blockers explicitly.
   mission.workpad.latestBlocker = 'Need to verify the candidate fix.';
   mission.workpad.notes.push('Attempt 2 should re-run the preview flow after patching.');
   const workflow = loader.load({ workspacePath });
+  const checklistSnapshot = createMissionChecklistSnapshot(mission, {
+    at: mission.updatedAt,
+    generationId: mission.activeGenerationId,
+  });
 
   const contract = createMissionAttemptPromptContract({
     mission,
     attempt,
     workflow,
+    checklistSnapshot,
   });
   const rendered = renderMissionAttemptPromptContract(contract);
 
   assert.equal(contract.workflowSourceLabel, workflowPath);
+  assert.equal(contract.checklistVersion, checklistSnapshot.version);
+  assert.equal(contract.activeChecklistItem?.title, 'Preview no longer freezes');
   assert.deepEqual(contract.finalReportSections, ['summary', 'verification', 'artifacts']);
   assert.ok(contract.stopConditions.includes('Ask for approval before modifying secrets.'));
   assert.match(rendered, /Workflow source:/);
   assert.match(rendered, /Acceptance criteria/);
+  assert.match(rendered, /Checklist focus/);
+  assert.match(rendered, /Current checklist item: \[acceptance\] Preview no longer freezes/);
   assert.match(rendered, /Current workpad context/);
   assert.match(rendered, /Final report contract/);
   assert.match(rendered, /Workflow instructions/);

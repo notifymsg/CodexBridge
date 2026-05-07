@@ -533,32 +533,34 @@ resume semantics so that:
 - completed or failed reruns still reset through package retry snapshots, so a
   deliberate fresh rerun keeps bounded clean-state behavior
 
-Phase 4-6 revalidation sync landed: package-level verification and bridge-side
+Phase 4-7 revalidation sync landed: package-level verification and bridge-side
 integration tests were rerun against the current `track/mission-control` code so
 that:
 
-- the completed status of Phase 4, Phase 5, and Phase 6 remains backed by
+- the completed status of Phase 4, Phase 5, Phase 6, and Phase 7 remains
+  backed by
   current code, not only by historical checklist state
 - the top-level roadmap can mark Mission Control's workflow/workpad/workspace,
-  verifier-authority, continuation, and CodexBridge control-surface integration
-  summary items complete without drifting from the tested implementation
+  verifier-authority, checklist-aware continuation, and CodexBridge
+  control-surface integration summary items complete without drifting from the
+  tested implementation
 - the current validation baseline is explicit:
   - `pnpm mission-control:typecheck`
   - `pnpm mission-control:test`
   - `pnpm mission-control:build`
   - `pnpm mission-control:check-boundary`
   - `pnpm test --test-name-pattern "Mission Control|WORKFLOW\\.md|interrupted provider turn|normal partial provider exit|approval requests" test/core/bridge_coordinator.test.ts`
-  - `pnpm test --test-name-pattern "AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions|AgentJobService retryJob still clears runtime history for fresh reruns" test/core/agent_job_service.test.ts`
+  - `pnpm test --test-name-pattern "AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions|AgentJobService retryJob preserves prior runtime history for fresh reruns via a new mission generation" test/core/agent_job_service.test.ts`
 
-Phase 6 is the current validated baseline, but several behaviors above are still
+Phase 7 is the current validated baseline, but several behaviors above are still
 transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
   shrinking toward a pure projection/cache
-- fresh rerun behavior still reflects the older reset-style baseline instead of
-  the final generation/lineage model
 - `/agent` reads still need to move further toward package-owned
   command/query/timeline contracts
+- source adapters and package-owned supervision semantics still belong to the
+  unfinished `Phase 9` backlog
 
 ## Phase 7: Checklist-First Domain Hardening
 
@@ -573,6 +575,12 @@ updates checklist progress from verifier feedback so hosts can observe repair /
 continue / waiting / done outcomes without reconstructing them from raw bridge
 status strings.
 
+Phase 7c landed: Mission Control attempt prompts and verifier inputs now carry
+the active checklist item, verifier feedback can advance one acceptance item at
+a time instead of treating the first `complete` as mission-wide completion, and
+the runtime only enters `completed` after the checklist progression reaches its
+final item and the final verifier pass succeeds.
+
 - [x] Add first-class `WorkItem` domain modeling distinct from host job/thread
   ids
 - [x] Add first-class `Checklist`, `ChecklistSnapshot`, and `ChecklistItem`
@@ -584,15 +592,15 @@ status strings.
 - [x] Add a typed `CycleResult` contract as the package-owned loop protocol
 - [x] Add `MissionGeneration`/run lineage so fresh reruns no longer clear prior
   history
-- [ ] Move completion semantics to:
+- [x] Move completion semantics to:
   - all checklist items complete
   - final goal verified
 
 Completion criteria:
 
-- [ ] Mission truth no longer depends on legacy "one prompt, one job" mental
+- [x] Mission truth no longer depends on legacy "one prompt, one job" mental
   models
-- [ ] Item-level verifier outcomes can drive continuation, repair, waiting, or
+- [x] Item-level verifier outcomes can drive continuation, repair, waiting, or
   completion without host-local heuristics
 - [x] Fresh reruns preserve prior mission history through generation/lineage
   instead of destructive reset

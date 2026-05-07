@@ -1,5 +1,18 @@
-import type { Mission, MissionAttempt } from './types.js';
+import type {
+  ChecklistItem,
+  ChecklistSnapshot,
+  Mission,
+  MissionAttempt,
+} from './types.js';
 import type { LoadedMissionWorkflow, MissionWorkflowFinalReportSection } from './workflow.js';
+
+export interface MissionPromptChecklistItem {
+  id: string;
+  kind: ChecklistItem['kind'];
+  title: string;
+  detail: string | null;
+  status: ChecklistItem['status'];
+}
 
 export interface MissionAttemptPromptContract {
   workflowSourceLabel: string;
@@ -7,6 +20,8 @@ export interface MissionAttemptPromptContract {
   missionTitle: string;
   generationIndex: number | null;
   attemptIndex: number | null;
+  checklistVersion: number | null;
+  activeChecklistItem: MissionPromptChecklistItem | null;
   objective: string;
   expectedOutput: string;
   acceptanceCriteria: string[];
@@ -23,6 +38,7 @@ export interface CreateMissionAttemptPromptContractInput {
   mission: Mission;
   attempt: MissionAttempt | null;
   workflow: LoadedMissionWorkflow;
+  checklistSnapshot?: ChecklistSnapshot | null;
 }
 
 const BUILT_IN_STOP_CONDITIONS = [
@@ -41,12 +57,15 @@ const FINAL_REPORT_SECTION_DESCRIPTIONS: Readonly<Record<MissionWorkflowFinalRep
 export function createMissionAttemptPromptContract(
   input: CreateMissionAttemptPromptContractInput,
 ): MissionAttemptPromptContract {
+  const activeChecklistItem = selectPromptChecklistItem(input.checklistSnapshot ?? null);
   return {
     workflowSourceLabel: input.workflow.source.label,
     missionId: input.mission.id,
     missionTitle: input.mission.title,
     generationIndex: input.attempt?.generationIndex ?? input.mission.activeGenerationIndex ?? null,
     attemptIndex: input.attempt?.index ?? null,
+    checklistVersion: input.checklistSnapshot?.version ?? null,
+    activeChecklistItem,
     objective: input.mission.immutableGoal,
     expectedOutput: input.mission.expectedOutput,
     acceptanceCriteria: [...input.mission.acceptanceCriteria],
@@ -84,6 +103,19 @@ export function renderMissionAttemptPromptContract(contract: MissionAttemptPromp
   lines.push('');
   lines.push('Acceptance criteria');
   lines.push(...renderBullets(contract.acceptanceCriteria));
+  if (contract.checklistVersion !== null || contract.activeChecklistItem) {
+    lines.push('');
+    lines.push('Checklist focus');
+    if (contract.checklistVersion !== null) {
+      lines.push(`Checklist version: ${contract.checklistVersion}`);
+    }
+    if (contract.activeChecklistItem) {
+      lines.push(`Current checklist item: [${contract.activeChecklistItem.kind}] ${contract.activeChecklistItem.title}`);
+      if (contract.activeChecklistItem.detail) {
+        lines.push(`Item detail: ${contract.activeChecklistItem.detail}`);
+      }
+    }
+  }
   if (contract.currentPlan.length > 0) {
     lines.push('');
     lines.push('Current plan');
@@ -140,4 +172,24 @@ function dedupeStrings(values: string[]): string[] {
     result.push(value);
   }
   return result;
+}
+
+function selectPromptChecklistItem(
+  snapshot: ChecklistSnapshot | null,
+): MissionPromptChecklistItem | null {
+  if (!snapshot) {
+    return null;
+  }
+  const acceptanceItem = snapshot.items.find((item) => item.kind === 'acceptance' && item.status !== 'completed');
+  const nextItem = acceptanceItem ?? snapshot.items.find((item) => item.status !== 'completed' && item.status !== 'skipped');
+  if (!nextItem) {
+    return null;
+  }
+  return {
+    id: nextItem.id,
+    kind: nextItem.kind,
+    title: nextItem.title,
+    detail: nextItem.detail,
+    status: nextItem.status,
+  };
 }

@@ -8,7 +8,9 @@ import {
 } from './domain_records.js';
 import {
   applyMissionVerifierResultToChecklistSnapshot,
+  completeChecklistSnapshot,
   createMissionCycleResult,
+  getActiveChecklistItem,
   getLatestMissionCycleResult,
   listMissionCycleResults,
   mapMissionStatusToMissionControlOutcome,
@@ -26,6 +28,7 @@ import type { ChecklistSnapshot, Mission, MissionAttempt, MissionEvent } from '.
 import {
   applyMissionVerifierResultToAttempt,
   applyMissionVerifierResultToMission,
+  applyMissionVerifierResultToWorkpad,
   createMissionRepairPrompt,
   createMissionVerifierResult,
   evaluateMissionVerifierBudget,
@@ -187,7 +190,7 @@ export class MissionRuntime {
           lastAttempt = verification.attempt;
           lastProviderResult = providerResult;
           lastVerifierResult = verification.verifierResult;
-          if (mission.status === 'repairing') {
+          if (verification.continueMission || mission.status === 'repairing') {
             continue;
           }
           return this.finalizeRun(mission, options.ownerId, initialEventCount, {
@@ -330,6 +333,7 @@ export class MissionRuntime {
       const promptText = createMissionRepairPrompt({
         mission,
         attempt: previousAttempt,
+        checklistSnapshot: this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId),
         workflow: input.workflow,
         verifierResult: {
           summary: previousAttempt.verifierSummary ?? mission.statusReason ?? 'Verifier requested a repair.',
@@ -355,6 +359,7 @@ export class MissionRuntime {
           mission,
           attempt: existingAttempt,
           workflow: input.workflow,
+          checklistSnapshot: this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId),
         }));
         return {
           mission,
@@ -374,6 +379,7 @@ export class MissionRuntime {
       mission,
       attempt,
       workflow: input.workflow,
+      checklistSnapshot: this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId),
     }));
     const runningMission = this.persistAttemptStart(mission, attempt, promptText, at);
     return {
@@ -544,6 +550,7 @@ export class MissionRuntime {
         promptText = buildContinuationPrompt({
           mission,
           attempt,
+          checklistSnapshot: this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId),
           workflow: input.workflow,
           providerResult,
           turnIndex,
@@ -754,11 +761,20 @@ export class MissionRuntime {
     mission: Mission;
     attempt: MissionAttempt;
     verifierResult: MissionVerifierResult;
+    continueMission: boolean;
   }> {
+    const currentChecklistSnapshot = this.repository.getChecklistSnapshotById(
+      input.mission.currentChecklistSnapshotId,
+    );
+    const activeChecklistItem = getActiveChecklistItem(currentChecklistSnapshot, {
+      preferredKinds: ['acceptance'],
+    });
     const usage = this.resolveBudgetUsage(input.mission.id, input.attempt, this.now());
     const verifierResult = await this.verifier.verify({
       mission: input.mission,
       attempt: input.attempt,
+      checklistSnapshot: currentChecklistSnapshot,
+      activeChecklistItem,
       workflow: input.workflow,
       providerResult: input.providerResult,
       attemptCount: usage.attemptCount,
@@ -780,26 +796,126 @@ export class MissionRuntime {
       })
       : verifierResult;
 
-    const currentChecklistSnapshot = this.repository.getChecklistSnapshotById(
-      input.mission.currentChecklistSnapshotId,
-    );
-    const updatedChecklistSnapshot = currentChecklistSnapshot
+    let updatedChecklistSnapshot = currentChecklistSnapshot
       ? applyMissionVerifierResultToChecklistSnapshot(
         currentChecklistSnapshot,
         effectiveResult,
         this.now(),
+        {
+          activeItemId: activeChecklistItem?.id ?? null,
+        },
       )
       : null;
+    const activeChecklistItemAfterVerification = updatedChecklistSnapshot && activeChecklistItem
+      ? updatedChecklistSnapshot.items.find((item) => item.id === activeChecklistItem.id) ?? null
+      : null;
+    const activeChecklistItemCompleted = currentChecklistSnapshot
+      ? activeChecklistItemAfterVerification?.status === 'completed'
+      : effectiveResult.verdict === 'complete';
+    const hasAcceptanceItems = currentChecklistSnapshot?.items.some(
+      (item) => item.kind === 'acceptance',
+    ) ?? false;
+    const hasRemainingAcceptanceItems = updatedChecklistSnapshot?.items.some(
+      (item) => item.kind === 'acceptance' && item.status !== 'completed' && item.status !== 'skipped',
+    ) ?? false;
+    const hasRemainingChecklistItems = updatedChecklistSnapshot?.items.some(
+      (item) => item.status !== 'completed' && item.status !== 'skipped',
+    ) ?? false;
+    const canFinalizeMission = effectiveResult.verdict === 'complete'
+      && activeChecklistItemCompleted
+      && (
+        !updatedChecklistSnapshot
+        || (hasAcceptanceItems ? !hasRemainingAcceptanceItems : !hasRemainingChecklistItems)
+      );
+    if (updatedChecklistSnapshot && canFinalizeMission) {
+      updatedChecklistSnapshot = completeChecklistSnapshot(
+        updatedChecklistSnapshot,
+        effectiveResult.summary,
+        this.now(),
+      );
+    }
     if (updatedChecklistSnapshot) {
       this.repository.saveChecklistSnapshot(updatedChecklistSnapshot);
     }
 
-    const updatedAttempt = this.repository.saveAttempt(applyMissionVerifierResultToAttempt(
+    let updatedAttempt = applyMissionVerifierResultToAttempt(
       input.attempt,
       effectiveResult,
       this.now(),
-    ));
-    let mission = applyMissionVerifierResultToMission(input.mission, effectiveResult, {
+    );
+    if (
+      activeChecklistItemCompleted
+      && (effectiveResult.verdict === 'complete' || effectiveResult.verdict === 'repair')
+    ) {
+      updatedAttempt = {
+        ...updatedAttempt,
+        status: 'completed',
+        error: null,
+        endedAt: this.now(),
+        updatedAt: this.now(),
+      };
+    }
+    updatedAttempt = this.repository.saveAttempt(updatedAttempt);
+
+    const continueMission = activeChecklistItemCompleted
+      && !canFinalizeMission
+      && (effectiveResult.verdict === 'complete' || effectiveResult.verdict === 'repair');
+
+    let mission: Mission;
+    if (continueMission) {
+      const continuationSummary = activeChecklistItem
+        ? `Checklist item complete: ${activeChecklistItem.title}`
+        : 'Checklist item complete. Continue the mission loop.';
+      mission = transitionMission(input.mission, 'queued', {
+        at: this.now(),
+        reason: continuationSummary,
+        activeAttemptId: updatedAttempt.id,
+        lastError: null,
+        lastResultPreview: input.providerResult.previewText
+          ?? input.providerResult.text
+          ?? input.mission.lastResultPreview,
+        workpad: {
+          ...applyMissionVerifierResultToWorkpad(input.mission.workpad, effectiveResult, this.now()),
+          latestBlocker: null,
+          finalResultSummary: input.mission.workpad.finalResultSummary,
+          updatedAt: this.now(),
+        },
+      });
+      mission = this.saveMission(mission);
+      const cycleResult = this.buildMissionCycleResult({
+        mission,
+        attempt: updatedAttempt,
+        checklistSnapshot: updatedChecklistSnapshot,
+        status: 'continue',
+        stage: `verifier.${effectiveResult.verdict}`,
+        progress: continuationSummary,
+        nextStep: 'Advance to the next checklist item within the same mission generation.',
+        verifierSummary: effectiveResult.summary,
+        evidence: {
+          verdict: effectiveResult.verdict,
+          completedItemId: activeChecklistItem?.id ?? null,
+          completedItemTitle: activeChecklistItem?.title ?? null,
+          missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+          budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+        },
+      });
+      this.appendMissionEvent(mission, 'mission.progress', continuationSummary, updatedAttempt, {
+        verdict: effectiveResult.verdict,
+        completedItemId: activeChecklistItem?.id ?? null,
+        completedItemTitle: activeChecklistItem?.title ?? null,
+        missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+        budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+        cycleResult,
+      });
+      return {
+        mission,
+        attempt: updatedAttempt,
+        verifierResult: effectiveResult,
+        continueMission: true,
+      };
+    }
+
+    mission = applyMissionVerifierResultToMission(input.mission, effectiveResult, {
       at: this.now(),
       resultText: effectiveResult.verdict === 'complete'
         ? input.providerResult.text
@@ -874,6 +990,7 @@ export class MissionRuntime {
       mission,
       attempt: updatedAttempt,
       verifierResult: effectiveResult,
+      continueMission: false,
     };
   }
 
@@ -1212,6 +1329,7 @@ export class MissionRuntime {
 function buildContinuationPrompt(input: {
   mission: Mission;
   attempt: MissionAttempt;
+  checklistSnapshot: ChecklistSnapshot | null;
   workflow: LoadedMissionWorkflow;
   providerResult: MissionProviderResult;
   turnIndex: number;
@@ -1220,6 +1338,7 @@ function buildContinuationPrompt(input: {
     mission: input.mission,
     attempt: input.attempt,
     workflow: input.workflow,
+    checklistSnapshot: input.checklistSnapshot,
   }));
   const lines = [
     basePrompt,
