@@ -189,6 +189,17 @@ Main remaining integration gap:
     confirmation, and only then queues the mission for supervision
   - `/agent show` now renders those package-backed start gates from mission
     detail instead of relying on bridge-local draft text after creation time
+- Phase 9m now adds the first package-backed loop snapshot UX on top of those
+  start gates:
+  - Mission Control exports a normalized `loopSnapshot` read model plus
+    `getMissionLoopSnapshot` / `streamMissionSnapshots` surfaces derived from
+    authoritative supervision state instead of raw shell output
+  - package summary/detail/execution views now carry current cycle, current
+    stage, current checklist item, progress, overall completion, next step,
+    latest blocker, and verifier summary through one host-neutral contract
+  - CodexBridge `/agent show` now renders those package-backed loop fields
+    directly from mission detail state, so the first host can inspect runtime
+    progress without loading `WORKFLOW.md` or inspecting `loop.sh` output
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -206,8 +217,8 @@ Main remaining integration gap:
   compatibility caches; and finishing the first-host product flow around:
   - host-side resolution for `PlanChangeRequest`, `waiting_user`, and
     `needs_human`
-  - package-backed mission snapshot UX for cycle/stage/completion/next-step
-    visibility without raw shell-log inspection
+  - checklist-backed loop continuation/resolution UX that does not depend on
+    raw shell logs or external `loop.sh` as the primary operator surface
 
 ## V0 Migration Baseline Sources
 

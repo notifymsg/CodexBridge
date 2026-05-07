@@ -18,6 +18,7 @@ import {
 } from './cycle_result.js';
 import { createMissionAggregateFromSourceSummary } from './source_mission.js';
 import { createWorkItemSourceSummary } from './source.js';
+import { createMissionSupervisionSnapshot } from './supervision.js';
 import { createMissionWorkpadStatusView } from './workpad_view.js';
 import {
   MissionWorkflowLoader,
@@ -38,6 +39,7 @@ import type {
   GetMissionAttemptsInput,
   GetMissionDetailInput,
   GetMissionExecutionInput,
+  GetMissionLoopSnapshotInput,
   GetMissionTimelineInput,
   ListMissionSummariesInput,
   MissionArtifactRefView,
@@ -52,6 +54,7 @@ import type {
   MissionExecutionRefsView,
   MissionExecutionView,
   MissionHostBindingView,
+  MissionLoopSnapshotView,
   MissionStreamFrame,
   MissionSummaryFilter,
   MissionSummaryView,
@@ -112,9 +115,11 @@ export class DirectMissionControlApi implements MissionControlApi {
       getMissionTimeline: (request) => this.handleGetMissionTimeline(request),
       getMissionAttempts: (request) => this.handleGetMissionAttempts(request),
       getMissionExecution: (request) => this.handleGetMissionExecution(request),
+      getMissionLoopSnapshot: (request) => this.handleGetMissionLoopSnapshot(request),
     };
     this.streams = {
       streamMission: (request) => this.handleStreamMission(request),
+      streamMissionSnapshots: (request) => this.handleStreamMissionSnapshots(request),
     };
   }
 
@@ -171,6 +176,16 @@ export class DirectMissionControlApi implements MissionControlApi {
       return withMeta(request.meta, null);
     }
     return withMeta(request.meta, this.buildMissionExecutionView(mission));
+  }
+
+  private handleGetMissionLoopSnapshot(
+    request: MissionControlRequest<GetMissionLoopSnapshotInput>,
+  ): MissionControlResponse<MissionLoopSnapshotView | null> {
+    const mission = this.repository.getMissionById(request.input.missionId);
+    if (!mission) {
+      return withMeta(request.meta, null);
+    }
+    return withMeta(request.meta, this.buildMissionLoopSnapshotView(mission));
   }
 
   private handleCreateMission(
@@ -536,6 +551,16 @@ export class DirectMissionControlApi implements MissionControlApi {
     }
   }
 
+  private async *handleStreamMissionSnapshots(
+    request: MissionControlRequest<GetMissionLoopSnapshotInput>,
+  ): AsyncIterable<MissionControlResponse<MissionLoopSnapshotView>> {
+    const mission = this.repository.getMissionById(request.input.missionId);
+    if (!mission) {
+      return;
+    }
+    yield withMeta(request.meta, this.buildMissionLoopSnapshotView(mission));
+  }
+
   private buildMissionSummaryView(mission: Mission): MissionSummaryView {
     const workItem = this.repository.getWorkItemById(mission.workItemId);
     const events = this.repository.listEvents(mission.id);
@@ -549,6 +574,7 @@ export class DirectMissionControlApi implements MissionControlApi {
       latestBlocker: mission.workpad.latestBlocker,
       latestVerifierSummary: mission.workpad.latestVerifierSummary,
       latestCycleResult: getLatestMissionCycleResult(events),
+      loopSnapshot: this.buildMissionLoopSnapshotView(mission, checklistSnapshot),
       finalResultSummary: mission.workpad.finalResultSummary,
       lastResultPreview: mission.lastResultPreview,
       lastError: mission.lastError,
@@ -587,6 +613,7 @@ export class DirectMissionControlApi implements MissionControlApi {
       stopRequest: cloneStopRequest(mission.stopRequest),
       pendingApproval: clonePendingApproval(mission.pendingApproval),
       latestCycleResult: getLatestMissionCycleResult(events),
+      loopSnapshot: this.buildMissionLoopSnapshotView(mission, checklistSnapshot),
       hostBindings: buildMissionHostBindings(mission),
       executionRefs: this.buildMissionExecutionRefs(mission),
       workflow: workflow.view,
@@ -597,6 +624,39 @@ export class DirectMissionControlApi implements MissionControlApi {
         workflow: workflow.loadedWorkflow,
       }),
       artifactRefs: buildMissionArtifactRefs(mission.resultArtifacts),
+    };
+  }
+
+  private buildMissionLoopSnapshotView(
+    mission: Mission,
+    checklistSnapshot = this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId),
+  ): MissionLoopSnapshotView {
+    const supervisionSnapshot = createMissionSupervisionSnapshot(this.repository, mission, this.now());
+    const checklistStatus = buildMissionChecklistStatusView(mission, checklistSnapshot);
+    const latestCycleResult = supervisionSnapshot.latestCycleResult;
+    const currentItem = resolveChecklistItemForLoopSnapshot(checklistSnapshot, latestCycleResult, checklistStatus);
+    return {
+      missionId: mission.id,
+      status: mission.status,
+      loopStatus: latestCycleResult?.status ?? null,
+      currentCycle: latestCycleResult?.cycle ?? mission.attemptCount,
+      currentStage: latestCycleResult?.stage ?? null,
+      currentProgress: latestCycleResult?.progress ?? supervisionSnapshot.summary,
+      currentItemId: latestCycleResult?.activeItemId ?? currentItem?.id ?? null,
+      currentItemTitle: currentItem?.title ?? null,
+      currentItemStatus: latestCycleResult?.activeItemStatus ?? currentItem?.status ?? null,
+      checklistVersion: latestCycleResult?.checklistVersion ?? checklistStatus.checklistSnapshotVersion,
+      overallCompletion: latestCycleResult?.overallCompletion ?? checklistStatus.overallCompletion,
+      nextStep: latestCycleResult?.nextStep ?? null,
+      latestBlocker: supervisionSnapshot.latestBlocker,
+      latestVerifierSummary: supervisionSnapshot.latestVerifierSummary,
+      finalResultSummary: supervisionSnapshot.finalResultSummary,
+      pendingApproval: clonePendingApproval(supervisionSnapshot.pendingApproval),
+      stopRequest: cloneStopRequest(supervisionSnapshot.stopRequest),
+      resumable: supervisionSnapshot.resumable,
+      supervisable: supervisionSnapshot.supervisable,
+      lastEventAt: supervisionSnapshot.lastEventAt,
+      updatedAt: supervisionSnapshot.updatedAt,
     };
   }
 
@@ -787,6 +847,18 @@ function buildMissionChecklistStatusView(
     overallCompletion: progress.overallCompletion,
     currentItem: currentItem ? { ...currentItem } : null,
   };
+}
+
+function resolveChecklistItemForLoopSnapshot(
+  checklistSnapshot: ChecklistSnapshot | null,
+  latestCycleResult: MissionSummaryView['latestCycleResult'],
+  checklistStatus: MissionSummaryView['checklistStatus'],
+) {
+  const activeItemId = latestCycleResult?.activeItemId ?? checklistStatus.currentItem?.id ?? null;
+  if (!activeItemId) {
+    return checklistStatus.currentItem;
+  }
+  return checklistSnapshot?.items.find((item) => item.id === activeItemId) ?? checklistStatus.currentItem;
 }
 
 function buildActorMetadata(

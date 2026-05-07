@@ -635,7 +635,16 @@ walks the user through checklist confirmation and immutable-prompt
 confirmation before queueing the mission, and `/agent show` surfaces those
 package-backed start gates directly from mission detail state.
 
-Phase 9l is the current validated baseline, but several behaviors above are
+Phase 9m landed: Mission Control now exposes package-owned loop snapshot read
+and stream surfaces on top of the existing supervision foundation, and
+CodexBridge `/agent show` now renders those package-backed cycle/stage/progress
+fields directly from mission detail state. Summary/detail/execution views now
+carry a normalized `loopSnapshot`, the package exports
+`getMissionLoopSnapshot` plus `streamMissionSnapshots`, and the first host can
+inspect current cycle, stage, checklist item, overall completion, next step,
+blocker, and verifier summary without depending on raw shell log output.
+
+Phase 9m is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
@@ -646,10 +655,6 @@ still transitional:
   pristine pre-attempt refresh path with authoritative lineage retention, and a
   first assistant-record-backed `local-todo` adapter, but broader source
   sync/reconciliation still belongs to the unfinished backlog
-- the first host surface still lacks package-backed loop snapshot UX for
-  `currentCycle` / current item / overall completion / next step / blocker /
-  verifier summary, so users still fall back to external loop output more often
-  than they should
 - package/runtime support for `PlanChangeRequest`, `waiting_user`, and
   `needs_human` exists, but the first host still needs a complete user-facing
   resolution flow before Mission Control can be treated as a fully productized
@@ -828,14 +833,14 @@ history.
 - [ ] Add package-owned command coverage for:
   - approval resolution
   - plan-change resolution
-- [ ] Add package-owned mission snapshot subscription/read surfaces that map
+- [x] Add package-owned mission snapshot subscription/read surfaces that map
   cleanly onto the formal `streamMissionSnapshots` / loop-status model
 - [x] Expose first-host start gates for `awaiting_checklist_confirm` and
   `awaiting_prompt_confirm` before the first autonomous cycle begins
 - [x] Require the first host to persist and explicitly confirm the
   `immutablePrompt` plus initial checklist snapshot instead of treating
   `/agent confirm` as a generic background-job launch
-- [ ] Add package-backed mission snapshot views to the first host so users can
+- [x] Add package-backed mission snapshot views to the first host so users can
   observe loop status through:
   - current cycle
   - current stage / checklist item

@@ -1,4 +1,5 @@
 import type {
+  ChecklistItemStatus,
   ChecklistItem,
   ChecklistSnapshot,
   Mission,
@@ -15,7 +16,7 @@ import type {
   PlanChangeRequest,
   WorkItem,
 } from './types.js';
-import type { MissionCycleResult } from './cycle_result.js';
+import type { MissionControlOutcome, MissionCycleResult } from './cycle_result.js';
 import type { WorkItemSourceSummary } from './source.js';
 import type { MissionWorkpadStatusView } from './workpad_view.js';
 import type { MissionWorkflowSource } from './workflow.js';
@@ -96,6 +97,30 @@ export interface MissionChecklistStatusView {
   currentItem: ChecklistItem | null;
 }
 
+export interface MissionLoopSnapshotView {
+  missionId: string;
+  status: MissionStatus;
+  loopStatus: MissionControlOutcome | null;
+  currentCycle: number;
+  currentStage: string | null;
+  currentProgress: string | null;
+  currentItemId: string | null;
+  currentItemTitle: string | null;
+  currentItemStatus: ChecklistItemStatus | null;
+  checklistVersion: number | null;
+  overallCompletion: number | null;
+  nextStep: string | null;
+  latestBlocker: string | null;
+  latestVerifierSummary: string | null;
+  finalResultSummary: string | null;
+  pendingApproval: MissionPendingApproval | null;
+  stopRequest: MissionStopRequest | null;
+  resumable: boolean;
+  supervisable: boolean;
+  lastEventAt: number | null;
+  updatedAt: number;
+}
+
 export interface MissionSummaryView {
   workItem: WorkItem | null;
   mission: Mission;
@@ -103,6 +128,7 @@ export interface MissionSummaryView {
   latestBlocker: string | null;
   latestVerifierSummary: string | null;
   latestCycleResult: MissionCycleResult | null;
+  loopSnapshot: MissionLoopSnapshotView;
   finalResultSummary: string | null;
   lastResultPreview: string | null;
   lastError: string | null;
@@ -164,6 +190,7 @@ export interface MissionExecutionView {
   stopRequest: MissionStopRequest | null;
   pendingApproval: MissionPendingApproval | null;
   latestCycleResult: MissionCycleResult | null;
+  loopSnapshot: MissionLoopSnapshotView;
   hostBindings: MissionHostBindingView;
   executionRefs: MissionExecutionRefsView;
   workflow: MissionWorkflowStatusView;
@@ -189,6 +216,10 @@ export interface GetMissionAttemptsInput {
 }
 
 export interface GetMissionExecutionInput {
+  missionId: string;
+}
+
+export interface GetMissionLoopSnapshotInput {
   missionId: string;
 }
 
@@ -307,12 +338,18 @@ export interface MissionControlQueries {
   getMissionExecution(
     request: MissionControlRequest<GetMissionExecutionInput>,
   ): MissionControlResponse<MissionExecutionView | null>;
+  getMissionLoopSnapshot(
+    request: MissionControlRequest<GetMissionLoopSnapshotInput>,
+  ): MissionControlResponse<MissionLoopSnapshotView | null>;
 }
 
 export interface MissionControlStreams {
   streamMission(
     request: MissionControlRequest<StreamMissionInput>,
   ): AsyncIterable<MissionControlResponse<MissionStreamFrame>>;
+  streamMissionSnapshots(
+    request: MissionControlRequest<GetMissionLoopSnapshotInput>,
+  ): AsyncIterable<MissionControlResponse<MissionLoopSnapshotView>>;
 }
 
 export interface MissionControlApi {

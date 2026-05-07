@@ -679,6 +679,17 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(listResult.data[0]?.executionRefs.providerRunId, 'run-api-1');
   assert.equal(listResult.data[0]?.artifactRefs[0]?.path, '/tmp/report.md');
   assert.equal(listResult.data[0]?.latestCycleResult?.status, 'retry');
+  assert.equal(listResult.data[0]?.loopSnapshot.currentCycle, 1);
+  assert.equal(listResult.data[0]?.loopSnapshot.currentStage, 'verifier.repair');
+  assert.equal(
+    listResult.data[0]?.loopSnapshot.currentProgress,
+    'Verification found missing release dry-run evidence.',
+  );
+  assert.equal(listResult.data[0]?.loopSnapshot.currentItemTitle, 'Patch exists');
+  assert.equal(
+    listResult.data[0]?.loopSnapshot.nextStep,
+    'Retry the mission with the missing verification evidence.',
+  );
   assert.equal(listResult.data[0]?.workflow.status, 'loaded');
   assert.equal(listResult.data[0]?.checklistStatus.generationIndex, 1);
   assert.equal(listResult.data[0]?.checklistStatus.currentItem?.title, 'Patch exists');
@@ -700,6 +711,10 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(detailResult.data?.planChangeRequests.length, 1);
   assert.equal(detailResult.data?.attempts.length, 1);
   assert.equal(detailResult.data?.latestCycleResult?.stage, 'verifier.repair');
+  assert.equal(detailResult.data?.loopSnapshot.loopStatus, 'retry');
+  assert.equal(detailResult.data?.loopSnapshot.currentItemTitle, 'Patch exists');
+  assert.equal(detailResult.data?.loopSnapshot.overallCompletion, 0);
+  assert.equal(detailResult.data?.loopSnapshot.latestVerifierSummary, 'Verification has not finished yet.');
   assert.equal(detailResult.data?.workflow.status, 'loaded');
   assert.equal(detailResult.data?.workflow.error, null);
   assert.equal(detailResult.data?.checklistStatus.totalItems, 6);
@@ -754,9 +769,52 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(executionResult.data?.executionRefs.workflowPath, '/repo/.codexbridge/mission/WORKFLOW.md');
   assert.equal(executionResult.data?.artifactRefs[0]?.name, 'report.md');
   assert.equal(executionResult.data?.latestCycleResult?.audit.eventSeq, 1);
+  assert.equal(executionResult.data?.loopSnapshot.status, 'verifying');
+  assert.equal(executionResult.data?.loopSnapshot.currentCycle, 1);
+  assert.equal(executionResult.data?.loopSnapshot.currentStage, 'verifier.repair');
+  assert.equal(executionResult.data?.loopSnapshot.currentItemTitle, 'Patch exists');
+  assert.equal(
+    executionResult.data?.loopSnapshot.nextStep,
+    'Retry the mission with the missing verification evidence.',
+  );
   assert.equal(executionResult.data?.workflow.status, 'loaded');
   assert.equal(executionResult.data?.checklistStatus.currentItem?.title, 'Patch exists');
   assert.equal(executionResult.data?.workpadStatus.latestVerifierSummary, 'Verification has not finished yet.');
+
+  const loopSnapshotResult = await api.queries.getMissionLoopSnapshot({
+    meta: {
+      requestId: 'req-loop-snapshot-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: verifying.id,
+    },
+  });
+  assert.equal(loopSnapshotResult.data?.status, 'verifying');
+  assert.equal(loopSnapshotResult.data?.loopStatus, 'retry');
+  assert.equal(loopSnapshotResult.data?.currentCycle, 1);
+  assert.equal(loopSnapshotResult.data?.currentStage, 'verifier.repair');
+  assert.equal(loopSnapshotResult.data?.currentItemTitle, 'Patch exists');
+  assert.equal(loopSnapshotResult.data?.latestBlocker, 'Waiting for the verification pass.');
+  assert.equal(loopSnapshotResult.data?.latestVerifierSummary, 'Verification has not finished yet.');
+
+  const loopSnapshotFrames = [];
+  for await (const frame of api.streams.streamMissionSnapshots({
+    meta: {
+      requestId: 'req-loop-stream-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: verifying.id,
+    },
+  })) {
+    loopSnapshotFrames.push(frame.data);
+  }
+  assert.equal(loopSnapshotFrames.length, 1);
+  assert.equal(loopSnapshotFrames[0]?.currentStage, 'verifier.repair');
+  assert.equal(loopSnapshotFrames[0]?.currentItemTitle, 'Patch exists');
 });
 
 test('direct mission control api surfaces invalid workflow state through package-owned read models', async () => {

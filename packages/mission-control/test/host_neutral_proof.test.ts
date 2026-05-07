@@ -282,6 +282,10 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
   assert.equal(detail?.hostBindings.bridgeSessionId, 'cli-session-proof-1');
   assert.equal(detail?.artifactRefs[0]?.path, artifactPath);
   assert.equal(detail?.latestVerifierSummary, 'CLI host proof accepted through the package-owned verifier contract.');
+  assert.equal(detail?.loopSnapshot.status, 'completed');
+  assert.equal(detail?.loopSnapshot.currentCycle, 1);
+  assert.equal(detail?.loopSnapshot.currentStage, 'verifier.complete');
+  assert.equal(detail?.loopSnapshot.overallCompletion, 100);
 
   const execution = api.queries.getMissionExecution({
     meta: {
@@ -297,6 +301,25 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
   assert.equal(execution?.executionRefs.providerThreadId, 'thread-cli-proof-1');
   assert.equal(execution?.hostBindings.platform, 'cli');
   assert.equal(execution?.artifactRefs[0]?.name, 'cli-host-proof.md');
+  assert.equal(execution?.loopSnapshot.loopStatus, 'done');
+  assert.equal(
+    execution?.loopSnapshot.nextStep,
+    null,
+  );
+
+  const loopSnapshot = api.queries.getMissionLoopSnapshot({
+    meta: {
+      requestId: 'req-cli-proof-loop-snapshot-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-cli-proof-1',
+    },
+  }).data;
+  assert.equal(loopSnapshot?.status, 'completed');
+  assert.equal(loopSnapshot?.loopStatus, 'done');
+  assert.equal(loopSnapshot?.overallCompletion, 100);
 
   const streamFrameTypes: string[] = [];
   for await (const frame of api.streams.streamMission({
@@ -314,6 +337,22 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
   }
   assert.equal(streamFrameTypes[0], 'detail');
   assert.ok(streamFrameTypes.includes('timeline_entry'));
+
+  const streamedSnapshots = [];
+  for await (const frame of api.streams.streamMissionSnapshots({
+    meta: {
+      requestId: 'req-cli-proof-stream-snapshot-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-cli-proof-1',
+    },
+  })) {
+    streamedSnapshots.push(frame.data);
+  }
+  assert.equal(streamedSnapshots.length, 1);
+  assert.equal(streamedSnapshots[0]?.currentStage, 'verifier.complete');
 
   assert.deepEqual(progressUpdates.map((update) => update.status), ['running', 'verifying']);
   assert.deepEqual(threadBindings, [{

@@ -6088,6 +6088,7 @@ export class BridgeCoordinator {
     }
     const job = resolved.job;
     const missionStatusView = detail.workpadStatus;
+    const loopSnapshot = detail.loopSnapshot;
     const workflowValue = detail.workflow.status === 'invalid'
       ? (detail.workflow.error ?? detail.workflow.source.label)
       : detail.workflow.source.label;
@@ -6120,22 +6121,47 @@ export class BridgeCoordinator {
         total: detail.checklistStatus.totalItems,
       }));
     }
-    if (detail.checklistStatus.currentItem?.title) {
+    if (loopSnapshot.currentCycle > 0) {
+      lines.push(this.t('coordinator.agent.loopCycle', {
+        value: String(loopSnapshot.currentCycle),
+      }));
+    }
+    if (loopSnapshot.currentStage) {
+      lines.push(this.t('coordinator.agent.loopStage', {
+        value: loopSnapshot.currentStage,
+      }));
+    }
+    if (loopSnapshot.currentProgress) {
+      lines.push(this.t('coordinator.agent.loopProgress', {
+        value: loopSnapshot.currentProgress,
+      }));
+    }
+    if (typeof loopSnapshot.overallCompletion === 'number') {
+      lines.push(this.t('coordinator.agent.loopCompletion', {
+        value: `${loopSnapshot.overallCompletion}%`,
+      }));
+    }
+    if (loopSnapshot.currentItemTitle) {
       lines.push(this.t('coordinator.agent.currentChecklistItem', {
-        value: detail.checklistStatus.currentItem.title,
+        value: loopSnapshot.currentItemTitle,
       }));
     }
     if (isAgentMissionAwaitingStartStatus(detail.mission.status)) {
       lines.push(...this.buildAgentStartGateLines(detail, resolved.index ?? job.id));
     }
-    if (missionStatusView.summary) {
+    if (loopSnapshot.nextStep) {
+      lines.push(this.t('coordinator.agent.loopNextStep', {
+        value: loopSnapshot.nextStep,
+      }));
+    }
+    if (missionStatusView.summary && missionStatusView.summary !== loopSnapshot.currentProgress) {
       lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
     }
-    if (missionStatusView.latestBlocker) {
-      lines.push(this.t('coordinator.agent.workpadBlocker', { value: missionStatusView.latestBlocker }));
+    if (loopSnapshot.latestBlocker) {
+      lines.push(this.t('coordinator.agent.workpadBlocker', { value: loopSnapshot.latestBlocker }));
     }
-    if (detail.latestVerifierSummary) {
-      lines.push(this.t('coordinator.agent.verification', { value: detail.latestVerifierSummary }));
+    if (loopSnapshot.latestVerifierSummary) {
+      lines.push(this.t('coordinator.agent.verification', { value: loopSnapshot.latestVerifierSummary }));
     }
     if (detail.lastResultPreview) {
       lines.push(this.t('coordinator.agent.lastResult', { value: detail.lastResultPreview }));

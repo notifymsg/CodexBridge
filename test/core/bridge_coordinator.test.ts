@@ -11,6 +11,10 @@ import {
   REVIEW_COMMAND_SKILL_ACTIONS,
   THREAD_COMMAND_SKILL_ACTIONS,
 } from '../../src/core/bridge_coordinator.js';
+import {
+  createMissionChecklistSnapshot,
+  createMissionCycleResult,
+} from '../../packages/mission-control/src/index.js';
 import { createCodexBridgeRuntime } from '../../src/runtime/bootstrap.js';
 
 function normalizeCommandSkillInput(value: unknown) {
@@ -7974,12 +7978,59 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     (waitingUserState.attempts[0] as Record<string, unknown>).status = 'waiting_user';
     (waitingUserState.attempts[0] as Record<string, unknown>).endedAt = null;
     (waitingUserState.attempts[0] as Record<string, unknown>).updatedAt = missionUpdatedAt + 1;
+    const waitingChecklistSnapshot = createMissionChecklistSnapshot(waitingUserState.mission as any, {
+      at: missionUpdatedAt + 1,
+    });
+    (waitingUserState as Record<string, unknown>).checklistSnapshots = [waitingChecklistSnapshot];
+    (waitingUserState as Record<string, unknown>).events = [{
+      id: `${job.id}-waiting-user-event-1`,
+      missionId: job.id,
+      attemptId,
+      generationId: waitingChecklistSnapshot.generationId,
+      generationIndex: 1,
+      kind: 'mission.waiting_user',
+      summary: '等待用户确认发布窗口。',
+      detail: null,
+      metadata: {
+        cycleResult: createMissionCycleResult({
+          mission: waitingUserState.mission as any,
+          attempt: waitingUserState.attempts[0] as any,
+          checklistSnapshot: waitingChecklistSnapshot,
+          cycle: 2,
+          status: 'waiting_user',
+          stage: 'verifier.waiting_user',
+          progress: '等待用户确认发布窗口。',
+          nextStep: '等待用户提供发布时间窗口后再继续。',
+          verifierSummary: '等待用户确认发布窗口。',
+          blocker: '发布窗口尚未确认。',
+          needUserAction: '请确认发布时间窗口。',
+          eventSeq: 1,
+          updatedAt: missionUpdatedAt + 1,
+        }),
+      },
+      createdAt: missionUpdatedAt + 1,
+    }];
     runtime.services.agentJobs.updateJob(job.id, {
       status: 'completed',
       running: false,
       stopRequested: false,
       missionRuntimeState: waitingUserState,
     });
+
+    const showWaiting = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent show 1',
+    });
+    const showWaitingText = showWaiting.messages.map((message) => message.text).join('\n');
+    assert.match(showWaitingText, /当前循环：2/);
+    assert.match(showWaitingText, /当前阶段：verifier\.waiting_user/);
+    assert.match(showWaitingText, /当前进展：等待用户确认发布窗口。/);
+    assert.match(showWaitingText, /总体完成：0%/);
+    assert.match(showWaitingText, /当前清单项：/);
+    assert.match(showWaitingText, /下一步：等待用户提供发布时间窗口后再继续。/);
+    assert.match(showWaitingText, /阻塞：等待用户确认。|阻塞：发布窗口尚未确认。/);
+    assert.match(showWaitingText, /验证：等待用户确认。/);
 
     const stopped = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
