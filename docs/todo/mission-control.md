@@ -119,7 +119,14 @@ records:
 Fresh reruns now open a new mission generation instead of destructively
 clearing prior attempt/event history, and runtime/API consumers can now read a
 typed cycle protocol without reconstructing loop state from bridge-local text.
-Whole-mission completion semantics are still pending inside Phase 7.
+
+Phase 7c now completes the first checklist-authoritative completion semantics:
+
+- attempt prompts and verifier inputs carry the active checklist item
+- verifier feedback can advance one acceptance item at a time instead of
+  treating the first `complete` as mission-wide success
+- the runtime only enters `completed` after checklist progression reaches its
+  final item and the final verifier pass succeeds
 
 Phase 8a now adds the first package-owned in-process API contract above those
 records:
@@ -139,6 +146,20 @@ Phase 8b now adds the first explicit host adapter contract beside that API:
   package-owned contract
 - `/agent` artifact rendering now prefers package-owned execution artifact refs
   before falling back to legacy `AgentJob` compatibility blobs
+
+Phase 8c now moves CodexBridge onto a package-owned authoritative mission
+repository while keeping `AgentJob` as a rebuildable compatibility projection:
+
+- runtime bootstrap now provisions a real Mission Control repository for both
+  in-memory and file-backed bridge runtimes
+- `/agent` creation, read/control queries, and `runAgentJobWithMissionControl`
+  now seed/backfill and then share that same repository instead of treating
+  `AgentJob.missionRuntimeState` as the only mission truth
+- legacy compatibility blobs can still backfill the authoritative repository
+  during migration, but bridge runtime state can now be reconstructed from the
+  package repository after projection loss or restart
+- host-side attachment/result caches still exist for compatibility, but they no
+  longer have to be the authoritative mission store
 
 That baseline is useful, but it is **not** the final target shape.
 The remaining work is to converge the current implementation toward the
@@ -624,17 +645,17 @@ Completion criteria:
   delivery/notification/auth context
 - [x] Move `/agent` reads and control actions further onto package-owned query
   and command contracts
-- [ ] Keep stripping bridge-owned runtime truth out of `AgentJob` until it is a
+- [x] Keep stripping bridge-owned runtime truth out of `AgentJob` until it is a
   projection/cache only
 - [x] Keep `/auto` entirely outside Mission Control ownership
 
 Completion criteria:
 
-- [ ] CodexBridge can render and control mission state without reconstructing
+- [x] CodexBridge can render and control mission state without reconstructing
   truth from compatibility blobs
-- [ ] `AgentJob` can be treated as a rebuildable host projection rather than an
+- [x] `AgentJob` can be treated as a rebuildable host projection rather than an
   authoritative store
-- [ ] host-specific command names remain outside the package contract
+- [x] host-specific command names remain outside the package contract
 
 ## Phase 9: Work Item Sources and Runtime Supervision
 
@@ -708,8 +729,8 @@ Mission Control is ready for broader extraction when:
 - [x] The package has no imports from platform/runtime/i18n command code
 - [ ] `WorkItem`/checklist/generation semantics are authoritative runtime
   models instead of host-local conventions
-- [ ] `AgentJob` is only a rebuildable host projection/cache, not mission truth
-- [ ] package-owned commands/queries/streams are enough for a host to observe
+- [x] `AgentJob` is only a rebuildable host projection/cache, not mission truth
+- [x] package-owned commands/queries/streams are enough for a host to observe
   and control missions
 - [ ] a later Telegram, web, or other host surface can integrate without
   changing mission core behavior

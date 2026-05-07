@@ -10,6 +10,8 @@ import type {
   ThreadMetadataRepository,
 } from '../../types/repository.js';
 import path from 'node:path';
+import type { MissionRepository } from '../../../packages/mission-control/src/index.js';
+import { JsonFileMissionRepository } from '../../../packages/mission-control/src/index.js';
 import { FileJsonAgentJobRepository } from './file_json_agent_job_repository.js';
 import { FileJsonAssistantRecordRepository } from './file_json_assistant_record_repository.js';
 import { FileJsonAutomationJobRepository } from './file_json_automation_job_repository.js';
@@ -30,6 +32,7 @@ export function createFileJsonRepositories(stateDir: string): {
   automationJobs: AutomationJobRepository;
   agentJobs: AgentJobRepository;
   assistantRecords: AssistantRecordRepository;
+  missionControl: MissionRepository;
 } {
   return {
     providerProfiles: new FileJsonProviderProfileRepository(path.join(stateDir, 'provider_profiles.json')),
@@ -41,5 +44,6 @@ export function createFileJsonRepositories(stateDir: string): {
     automationJobs: new FileJsonAutomationJobRepository(path.join(stateDir, 'automation_jobs.json')),
     agentJobs: new FileJsonAgentJobRepository(path.join(stateDir, 'agent_jobs.json')),
     assistantRecords: new FileJsonAssistantRecordRepository(path.join(stateDir, 'assistant_records.json')),
+    missionControl: new JsonFileMissionRepository(stateDir, 'mission-control.json'),
   };
 }

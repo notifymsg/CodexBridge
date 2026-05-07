@@ -423,3 +423,74 @@ test('file-backed repositories preserve agent jobs across repository reloads', a
   assert.equal(restored?.missionAttemptHistory.length, 4);
   assert.equal(restored?.missionAttemptHistory.at(-1)?.status, 'completed');
 });
+
+test('file-backed Mission Control authority survives AgentJob projection loss across runtime reloads', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-mission-authority-'));
+  const providerProfile = makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default');
+  const providerPlugin = new FakeProviderPlugin('openai-native');
+  const repositoriesA = createFileJsonRepositories(stateDir);
+  const runtimeA = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: repositoriesA,
+  });
+  const session = await runtimeA.services.bridgeSessions.createDetachedSession({
+    providerProfileId: providerProfile.id,
+    cwd: '/repo',
+    title: 'Agent | Authority',
+    initialSettings: {
+      locale: 'zh-CN',
+    },
+  });
+  const created = runtimeA.services.agentJobs.createJob({
+    scopeRef: {
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-authority-store',
+    },
+    title: '权威 Mission',
+    originalInput: 'authority',
+    goal: '验证 package-owned mission authority',
+    expectedOutput: '重启后仍可恢复',
+    plan: ['创建任务', '清空投影', '重载运行时'],
+    category: 'doc',
+    riskLevel: 'low',
+    mode: 'codex',
+    providerProfileId: providerProfile.id,
+    bridgeSessionId: session.id,
+    cwd: '/repo',
+    locale: 'zh-CN',
+  });
+
+  assert.equal(runtimeA.repositories.missionControl.getMissionById(created.id)?.title, '权威 Mission');
+
+  repositoriesA.agentJobs.save({
+    ...runtimeA.services.agentJobs.requireById(created.id),
+    missionRuntimeState: null,
+    missionAttemptHistory: [],
+    missionWorkflowPath: null,
+    missionWorkflowSourceLabel: null,
+    missionWorkpadLatestBlocker: null,
+    missionWorkpadLatestVerifierSummary: null,
+    missionWorkpadFinalResultSummary: null,
+  });
+
+  const runtimeB = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  const detail = runtimeB.services.agentJobs.getMissionDetail(created.id);
+  assert.equal(detail?.mission.id, created.id);
+  assert.equal(detail?.mission.title, '权威 Mission');
+  assert.equal(runtimeB.repositories.missionControl.getMissionById(created.id)?.title, '权威 Mission');
+
+  const shown = await runtimeB.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-agent-authority-store',
+    text: '/agent show 1',
+  });
+  assert.match(shown.messages.map((message: any) => message?.text ?? '').join('\n'), /权威 Mission/);
+});

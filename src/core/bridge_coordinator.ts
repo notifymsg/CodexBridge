@@ -6168,7 +6168,7 @@ export class BridgeCoordinator {
         ], this.buildScopedSessionMeta(event));
       }
       const artifact = this.createAgentResultTextArtifact(job, resultText);
-      const existingArtifacts = normalizeAgentArtifacts(job.resultArtifacts ?? null);
+      const existingArtifacts = this.resolveAgentJobArtifacts(rawJob);
       if (!existingArtifacts.some((item) => item.path === artifact.path)) {
         this.agentJobs.updateJob(job.id, {
           resultText,
@@ -6215,8 +6215,9 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const job = createMissionControlledAgentJobView(resolved.job);
-    const artifacts = this.resolveAgentJobArtifacts(job);
+    const rawJob = resolved.job;
+    const job = createMissionControlledAgentJobView(rawJob);
+    const artifacts = this.resolveAgentJobArtifacts(rawJob);
     if (artifacts.length === 0) {
       return messageResponse([
         this.t('coordinator.agent.noAttachments'),
@@ -6868,6 +6869,7 @@ export class BridgeCoordinator {
   }
 
   resolveAgentJobArtifacts(job: AgentJob): TurnArtifactDeliveredItem[] {
+    const directProjection = normalizeAgentArtifacts(job.resultArtifacts ?? null);
     const effectiveJob = createMissionControlledAgentJobView(job);
     const missionExecution = this.agentJobs?.getMissionExecution(effectiveJob.id);
     const projectedArtifacts = normalizeMissionExecutionArtifacts(missionExecution?.artifactRefs ?? null);
@@ -6877,6 +6879,9 @@ export class BridgeCoordinator {
     const direct = normalizeAgentArtifacts(effectiveJob.resultArtifacts ?? null);
     if (direct.length > 0) {
       return direct;
+    }
+    if (directProjection.length > 0) {
+      return directProjection;
     }
     const session = this.agentJobs?.getSession?.(effectiveJob) ?? this.bridgeSessions.getSessionById(effectiveJob.bridgeSessionId);
     const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;

@@ -62,17 +62,24 @@ Main remaining integration gap:
   - progress and approval forwarding
   - artifact publication / notification hooks
   - host context lookup
+- Phase 8c now adds a package-owned authoritative mission repository inside
+  CodexBridge runtime:
+  - in-memory and file-backed runtimes both provision a real Mission Control
+    repository
+  - `/agent` create/read/control/run paths backfill and then share that same
+    repository
+  - `AgentJob` can now be rebuilt as a compatibility projection/cache after
+    restart or projection loss instead of remaining the only mission store
 - `/agent` `list/show/stop/retry` now consume that package API through an
-  `AgentJob`-backed host adapter repository instead of rebuilding runtime truth
-  directly from bridge compatibility fields
+  authoritative mission repository plus `AgentJob` projection instead of
+  rebuilding runtime truth directly from bridge compatibility fields
 - `/agent runAgentJob` now routes its current host-owned session/thread binding,
   progress, approval forwarding, and artifact-publication seams through that
   host adapter contract instead of wiring those concerns straight through the
   runner
-- the next hardening work is finishing `AgentJob` projection cleanup and moving
-  the remaining read/control paths onto the same package-owned surface, so
-  future Telegram, CLI, or web hosts do not re-implement bridge-local runtime
-  logic
+- the next hardening work is finishing the remaining projection thinning and
+  Phase 9 source/supervision semantics, so future Telegram, CLI, or web hosts
+  do not re-implement bridge-local runtime logic
 
 ## V0 Migration Baseline Sources
 

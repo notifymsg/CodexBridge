@@ -10,27 +10,16 @@ import type {
 } from '../../packages/mission-control/src/index.js';
 import {
   createProjectedMissionRuntimeStateForAgentJob,
-  loadAgentJobMissionRuntimeState,
-  serializeAgentJobMissionRuntimeState,
 } from './mission_control_agent_job_adapter.js';
+import {
+  buildAgentJobMissionPatch,
+  loadMissionRuntimeStateFromJob,
+  type AgentJobMissionProjectionState,
+} from './mission_control_agent_job_projection.js';
 import type {
   AgentJob,
-  AgentJobAttemptHistoryEntry,
-  AgentJobMissionRuntimeState,
-  AgentJobStatus,
   BridgeSession,
-  TurnArtifactDeliveredItem,
 } from '../types/core.js';
-
-type MissionRuntimeState = {
-  workItem: WorkItem | null;
-  mission: Mission | null;
-  generations: MissionGeneration[];
-  checklistSnapshots: ChecklistSnapshot[];
-  planChangeRequests: PlanChangeRequest[];
-  attempts: MissionAttempt[];
-  events: MissionEvent[];
-};
 
 export interface AgentJobMissionRepositoryStore {
   listJobs(): AgentJob[];
@@ -258,8 +247,8 @@ export class AgentJobMissionRepository implements MissionRepository {
     return job;
   }
 
-  private ensureRuntimeState(job: AgentJob): MissionRuntimeState {
-    const state = loadAgentJobMissionRuntimeState(job);
+  private ensureRuntimeState(job: AgentJob): AgentJobMissionProjectionState {
+    const state = loadMissionRuntimeStateFromJob(job);
     if (state.mission || !this.materializeMissingState) {
       return state;
     }
@@ -271,152 +260,10 @@ export class AgentJobMissionRepository implements MissionRepository {
     return synthesized;
   }
 
-  private persistState(job: AgentJob, state: MissionRuntimeState): AgentJob {
+  private persistState(job: AgentJob, state: AgentJobMissionProjectionState): AgentJob {
     const patch = buildAgentJobMissionPatch(job, state);
     return this.store.updateJob(job.id, patch);
   }
-}
-
-function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): Partial<AgentJob> {
-  const mission = state.mission;
-  if (!mission) {
-    return {
-      missionRuntimeState: null,
-      missionAttemptHistory: [],
-    };
-  }
-  const attempts = [...state.attempts].sort((left, right) => {
-    const leftGeneration = left.generationIndex ?? 0;
-    const rightGeneration = right.generationIndex ?? 0;
-    if (leftGeneration !== rightGeneration) {
-      return leftGeneration - rightGeneration;
-    }
-    return left.index - right.index;
-  });
-  return {
-    status: mapMissionStatusToAgentJobStatus(mission.status),
-    running: ACTIVE_MISSION_JOB_STATUS_SET.has(mission.status),
-    stopRequested: mission.status === 'stopped',
-    attemptCount: mission.attemptCount,
-    lastRunAt: mission.lastRunAt,
-    completedAt: TERMINAL_MISSION_JOB_STATUS_SET.has(mission.status)
-      ? (mission.completedAt ?? mission.stoppedAt ?? mission.updatedAt)
-      : null,
-    lastResultPreview: summarizeMissionPreview(mission.lastResultPreview, mission.resultArtifacts),
-    resultText: mission.resultText,
-    resultArtifacts: mapMissionArtifactsToAgentArtifacts(mission.resultArtifacts),
-    lastError: mission.lastError,
-    verificationSummary: mission.workpad.latestVerifierSummary,
-    missionWorkflowPath: mission.workflowPath,
-    missionWorkflowSourceLabel: mission.workflowPath
-      ? `configured workflow (${mission.workflowPath})`
-      : job.missionWorkflowSourceLabel,
-    missionWorkpadLatestBlocker: mission.workpad.latestBlocker,
-    missionWorkpadLatestVerifierSummary: mission.workpad.latestVerifierSummary,
-    missionWorkpadFinalResultSummary: mission.workpad.finalResultSummary ?? mission.lastResultPreview,
-    missionAttemptHistory: buildAttemptHistory(attempts),
-    missionRuntimeState: serializeMissionRuntimeState(state),
-  };
-}
-
-function buildAttemptHistory(attempts: MissionAttempt[]): AgentJobAttemptHistoryEntry[] {
-  return attempts.map((attempt) => ({
-    attempt: attempt.index,
-    status: mapMissionAttemptStatusToAgentJobStatus(attempt.status),
-    verifierSummary: attempt.verifierSummary,
-    outputPreview: attempt.outputPreview,
-    error: attempt.error,
-    recordedAt: attempt.endedAt ?? attempt.updatedAt,
-  }));
-}
-
-function serializeMissionRuntimeState(state: MissionRuntimeState): AgentJobMissionRuntimeState {
-  return {
-    workItem: state.workItem ? (cloneValue(state.workItem) as unknown as Record<string, unknown>) : null,
-    mission: state.mission ? (cloneValue(state.mission) as unknown as Record<string, unknown>) : null,
-    generations: state.generations.map((generation) => cloneValue(generation) as unknown as Record<string, unknown>),
-    checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot) as unknown as Record<string, unknown>),
-    planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest) as unknown as Record<string, unknown>),
-    attempts: state.attempts.map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
-    events: state.events.map((event) => cloneValue(event) as unknown as Record<string, unknown>),
-  };
-}
-
-function mapMissionStatusToAgentJobStatus(status: Mission['status']): AgentJobStatus {
-  switch (status) {
-    case 'draft':
-      return 'queued';
-    case 'queued':
-    case 'planning':
-    case 'running':
-    case 'verifying':
-    case 'repairing':
-    case 'waiting_user':
-    case 'needs_human':
-    case 'handoff':
-    case 'blocked':
-    case 'completed':
-    case 'failed':
-    case 'stopped':
-      return status;
-    case 'archived':
-      return 'completed';
-  }
-}
-
-function mapMissionAttemptStatusToAgentJobStatus(status: MissionAttempt['status']): AgentJobStatus {
-  switch (status) {
-    case 'queued':
-    case 'running':
-    case 'verifying':
-    case 'repairing':
-    case 'waiting_user':
-    case 'needs_human':
-    case 'handoff':
-    case 'blocked':
-    case 'completed':
-    case 'failed':
-    case 'stopped':
-      return status;
-  }
-}
-
-function mapMissionArtifactsToAgentArtifacts(value: unknown[]): TurnArtifactDeliveredItem[] | null {
-  const normalized = value
-    .map((artifact) => {
-      const record = artifact as Record<string, unknown> | null;
-      const type = compactString(record?.type);
-      const artifactPath = compactString(record?.path);
-      if (!type || !artifactPath) {
-        return null;
-      }
-      return {
-        kind: type === 'other' ? 'file' : (type as TurnArtifactDeliveredItem['kind']),
-        path: artifactPath,
-        displayName: compactString(record?.name),
-        mimeType: compactString(record?.mimeType),
-        sizeBytes: null,
-        caption: compactString(record?.caption),
-        source: 'provider_native' as const,
-        turnId: null,
-      };
-    })
-    .filter(Boolean) as TurnArtifactDeliveredItem[];
-  return normalized.length > 0 ? normalized : null;
-}
-
-function summarizeMissionPreview(value: string | null, artifacts: unknown[]): string | null {
-  const text = compactString(value);
-  if (text) {
-    return text.length > 180 ? `${text.slice(0, 179)}…` : text;
-  }
-  const artifactCount = Array.isArray(artifacts) ? artifacts.length : 0;
-  return artifactCount > 0 ? `attachments: ${artifactCount}` : null;
-}
-
-function compactString(value: unknown): string | null {
-  const normalized = String(value ?? '').trim();
-  return normalized.length > 0 ? normalized : null;
 }
 
 function cloneValue<T>(value: T): T {
@@ -433,21 +280,3 @@ function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
   next[index] = cloneValue(value);
   return next;
 }
-
-const ACTIVE_MISSION_JOB_STATUS_SET = new Set<Mission['status']>([
-  'planning',
-  'running',
-  'verifying',
-  'repairing',
-]);
-
-const TERMINAL_MISSION_JOB_STATUS_SET = new Set<Mission['status']>([
-  'waiting_user',
-  'needs_human',
-  'handoff',
-  'blocked',
-  'completed',
-  'failed',
-  'stopped',
-  'archived',
-]);

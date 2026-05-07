@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  InMemoryMissionRepository,
   createMission,
   transitionMission,
   type MissionAttempt,
@@ -47,6 +48,60 @@ function createAgentJobFixture(service: AgentJobService) {
     maxAttempts: 3,
   });
 }
+
+test('AgentJobService keeps package-owned mission authority when AgentJob compatibility state is missing', () => {
+  const now = 1_701_099_990_000;
+  const bridgeSession: BridgeSession = {
+    id: 'session-agent-service-1',
+    providerProfileId: 'codex-default',
+    codexThreadId: 'thread-agent-service-1',
+    cwd: '/repo',
+    title: 'Mission session',
+    createdAt: now - 1_000,
+    updatedAt: now - 500,
+  };
+  const agentJobs = new InMemoryAgentJobRepository();
+  const missionRepository = new InMemoryMissionRepository();
+  const service = new AgentJobService({
+    agentJobs,
+    missionRepository,
+    bridgeSessions: {
+      getSessionById(bridgeSessionId: string) {
+        return bridgeSessionId === bridgeSession.id ? bridgeSession : null;
+      },
+    },
+    now: () => now,
+  });
+
+  const created = createAgentJobFixture(service);
+  assert.equal(missionRepository.getMissionById(created.id)?.title, created.title);
+
+  agentJobs.save({
+    ...service.requireById(created.id),
+    missionRuntimeState: null,
+    missionAttemptHistory: [],
+    missionWorkflowPath: null,
+    missionWorkflowSourceLabel: null,
+    missionWorkpadLatestBlocker: null,
+    missionWorkpadLatestVerifierSummary: null,
+    missionWorkpadFinalResultSummary: null,
+  });
+
+  const detail = service.getMissionDetail(created.id);
+  assert.equal(detail?.mission.id, created.id);
+  assert.equal(detail?.mission.title, created.title);
+  assert.equal(detail?.workItem?.title, created.title);
+  assert.equal(detail?.hostBindings.bridgeSessionId, bridgeSession.id);
+
+  const renamed = service.renameJob(created.id, 'Renamed authority task');
+  assert.equal(renamed.title, 'Renamed authority task');
+  assert.equal(service.getMissionDetail(created.id)?.mission.title, 'Renamed authority task');
+  assert.equal(missionRepository.getMissionById(created.id)?.title, 'Renamed authority task');
+  assert.equal(
+    missionRepository.getWorkItemById(`${created.id}:work-item`)?.title,
+    'Renamed authority task',
+  );
+});
 
 test('AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions', () => {
   const now = 1_701_100_000_000;

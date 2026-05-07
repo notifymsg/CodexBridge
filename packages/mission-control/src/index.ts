@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-8b-host-adapter-contracts' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-8c-authoritative-mission-repository' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',
@@ -39,6 +39,7 @@ export * from './types.js';
 export * from './domain_records.js';
 export * from './state_machine.js';
 export * from './repository.js';
+export * from './in_memory_mission_repository.js';
 export * from './json_file_mission_repository.js';
 export * from './workflow.js';
 export * from './prompt_contract.js';

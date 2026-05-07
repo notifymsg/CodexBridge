@@ -26,7 +26,6 @@ import {
   type WorkItem,
 } from '../../packages/mission-control/src/index.js';
 import { AgentJobService } from './agent_job_service.js';
-import { AgentJobMissionRepository as AgentJobMissionStateRepository } from './mission_control_agent_job_repository.js';
 import { CodexBridgeMissionHostAdapter } from './mission_control_host_adapter.js';
 import type {
   AgentJob,
@@ -129,22 +128,16 @@ export async function runAgentJobWithMissionControl(
   options: RunAgentJobWithMissionControlOptions,
 ): Promise<MissionControlAgentJobRunOutput> {
   const now = options.now ?? (() => Date.now());
-  const repository = new AgentJobMissionStateRepository({
-    listJobs: () => options.agentJobs.listAllJobs(),
-    getJobById: (id) => options.agentJobs.getById(id),
-    updateJob: (id, updates) => options.agentJobs.updateJob(id, updates),
-    resolveSession: (job) => options.resolveSession(options.agentJobs.getById(job.id) ?? job),
-  }, {
-    now,
-    materializeMissingState: false,
-  });
+  const currentJob = options.agentJobs.getById(options.job.id) ?? options.job;
+  options.agentJobs.ensureMissionRecord(currentJob.id);
+  const repository = options.agentJobs.getMissionRepository();
   const scopeRef = {
-    platform: options.job.platform,
-    externalScopeId: options.job.externalScopeId,
+    platform: currentJob.platform,
+    externalScopeId: currentJob.externalScopeId,
   };
-  const initialSession = options.resolveSession(options.job);
+  const initialSession = options.resolveSession(currentJob);
   const mission = prepareMissionSnapshot({
-    job: options.job,
+    job: currentJob,
     session: initialSession,
     repository,
     now,
