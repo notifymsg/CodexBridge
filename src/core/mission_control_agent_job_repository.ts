@@ -2,6 +2,8 @@ import type {
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
   MissionEvent,
   MissionGeneration,
   MissionRepository,
@@ -210,6 +212,58 @@ export class AgentJobMissionRepository implements MissionRepository {
     return attempt;
   }
 
+  getEnvironmentStampById(id: string): MissionEnvironmentStamp | null {
+    for (const job of this.store.listJobs()) {
+      const stamp = this.ensureRuntimeState(job).environmentStamps.find((entry) => entry.id === id);
+      if (stamp) {
+        return cloneValue(stamp);
+      }
+    }
+    return null;
+  }
+
+  listEnvironmentStamps(missionId: string): MissionEnvironmentStamp[] {
+    const job = this.store.getJobById(missionId);
+    return job ? this.ensureRuntimeState(job).environmentStamps : [];
+  }
+
+  saveEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+    const currentJob = this.requireJob(stamp.missionId);
+    const currentState = this.ensureRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      environmentStamps: upsertById(currentState.environmentStamps, stamp)
+        .sort((left, right) => left.capturedAt - right.capturedAt),
+    });
+    return stamp;
+  }
+
+  getCheckpointById(id: string): MissionCheckpoint | null {
+    for (const job of this.store.listJobs()) {
+      const checkpoint = this.ensureRuntimeState(job).checkpoints.find((entry) => entry.id === id);
+      if (checkpoint) {
+        return cloneValue(checkpoint);
+      }
+    }
+    return null;
+  }
+
+  listCheckpoints(missionId: string): MissionCheckpoint[] {
+    const job = this.store.getJobById(missionId);
+    return job ? this.ensureRuntimeState(job).checkpoints : [];
+  }
+
+  saveCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+    const currentJob = this.requireJob(checkpoint.missionId);
+    const currentState = this.ensureRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      checkpoints: upsertById(currentState.checkpoints, checkpoint)
+        .sort((left, right) => left.createdAt - right.createdAt),
+    });
+    return checkpoint;
+  }
+
   listEvents(missionId: string): MissionEvent[] {
     const job = this.store.getJobById(missionId);
     return job ? this.ensureRuntimeState(job).events : [];
@@ -234,6 +288,8 @@ export class AgentJobMissionRepository implements MissionRepository {
       checklistSnapshots: [],
       planChangeRequests: [],
       attempts: [],
+      environmentStamps: [],
+      checkpoints: [],
       events: [],
     });
     return mission;

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,6 +29,15 @@ function writeWorkflow(cwd: string, frontMatter = ''): string {
     : 'Execute the mission carefully and verify the result.\n';
   fs.writeFileSync(workflowPath, text, 'utf8');
   return workflowPath;
+}
+
+function initGitRepo(cwd: string): void {
+  execFileSync('git', ['init', '-b', 'main'], { cwd, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'mission-control@example.com'], { cwd, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Mission Control'], { cwd, stdio: 'ignore' });
+  fs.writeFileSync(path.join(cwd, 'README.md'), '# runtime test\n', 'utf8');
+  execFileSync('git', ['add', 'README.md'], { cwd, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'init'], { cwd, stdio: 'ignore' });
 }
 
 function createQueuedMission(params: {
@@ -90,6 +100,7 @@ test('mission runtime keeps verifier repair loops bounded and only completes aft
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-repair-cwd-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-repair-state-'));
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-repair-root-'));
+  initGitRepo(cwd);
   const workflowPath = writeWorkflow(cwd, `
 version: 1
 maxTurns: 4
@@ -215,6 +226,28 @@ continuation: allow
   assert.equal(activeGeneration?.workflowPath, workflowPath);
   assert.equal(activeGeneration?.workflowHash?.length, 64);
   assert.equal(activeGeneration?.resolverReason, 'cwd_default');
+
+  const environmentStamps = repo.listEnvironmentStamps(mission.id)
+    .slice()
+    .sort((left, right) => left.capturedAt - right.capturedAt);
+  assert.equal(environmentStamps.length, 2);
+  assert.deepEqual(
+    environmentStamps.map((stamp) => stamp.attemptId).sort(),
+    attempts.map((attempt) => attempt.id).sort(),
+  );
+  const firstAttemptStamp = environmentStamps.find((stamp) => stamp.attemptId === attempts[0]?.id);
+  assert.equal(firstAttemptStamp?.workspacePath, path.join(rootDir, 'workspaces', mission.id));
+  assert.equal(firstAttemptStamp?.cwd, cwd);
+  assert.equal(firstAttemptStamp?.workflowHash?.length, 64);
+  assert.equal(firstAttemptStamp?.providerProfileId, 'codex-default');
+  assert.equal(firstAttemptStamp?.gitBranch, 'main');
+  assert.equal(firstAttemptStamp?.gitSha?.length, 40);
+
+  const checkpoints = repo.listCheckpoints(mission.id);
+  assert.ok(checkpoints.some((checkpoint) => checkpoint.stage === 'attempt.started'));
+  assert.ok(checkpoints.some((checkpoint) => checkpoint.stage === 'provider.candidate_ready'));
+  assert.ok(checkpoints.some((checkpoint) => checkpoint.stage === 'verifier.repair'));
+  assert.ok(checkpoints.some((checkpoint) => checkpoint.stage === 'verifier.complete'));
 
   const eventKinds = repo.listEvents(mission.id).map((event) => event.kind);
   assert.ok(eventKinds.includes('mission.retrying'));

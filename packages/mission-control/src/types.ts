@@ -322,6 +322,35 @@ export interface MissionAttempt {
   updatedAt: number;
 }
 
+export interface MissionEnvironmentStamp {
+  id: string;
+  missionId: string;
+  generationId: string;
+  generationIndex: number;
+  attemptId: string | null;
+  cycle: number;
+  cwd: string | null;
+  workspacePath: string | null;
+  gitSha: string | null;
+  gitBranch: string | null;
+  workflowHash: string | null;
+  providerProfileId: string | null;
+  capturedAt: number;
+}
+
+export interface MissionCheckpoint {
+  id: string;
+  missionId: string;
+  attemptId: string | null;
+  generationId: string;
+  generationIndex: number;
+  cycle: number;
+  stage: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
+
 export interface MissionEvent {
   id: string;
   missionId: string;

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import {
   createMissionStopRequest,
@@ -29,7 +30,14 @@ import {
 } from './provider.js';
 import { type MissionRepository } from './repository.js';
 import { transitionMission } from './state_machine.js';
-import type { ChecklistSnapshot, Mission, MissionAttempt, MissionEvent } from './types.js';
+import type {
+  ChecklistSnapshot,
+  Mission,
+  MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
+  MissionEvent,
+} from './types.js';
 import {
   applyMissionVerifierResultToAttempt,
   applyMissionVerifierResultToMission,
@@ -186,6 +194,12 @@ export class MissionRuntime {
           issues: [...workflowResult.error.issues],
           cycleResult,
         });
+        this.saveCheckpointRecord(mission, null, 'workflow.load_failed', summary, {
+          workflowPath: workflowResult.error.workflowPath,
+          workflowHash: null,
+          resolverReason: workflowSelection.resolverReason,
+          issues: [...workflowResult.error.issues],
+        });
         return this.finalizeRun(mission, options.ownerId, initialEventCount, {
           attempt: null,
           workflow: null,
@@ -206,6 +220,11 @@ export class MissionRuntime {
       });
       mission = this.updateMissionFields(mission, {
         workspacePath: workspace.workspacePath,
+      });
+      this.saveCheckpointRecord(mission, null, 'workspace.ready', 'Workspace ready for mission execution.', {
+        workspacePath: workspace.workspacePath,
+        mode: workspace.mode,
+        workflowPath: workflow.source.path,
       });
       const workspaceStop = await this.consumePersistedStopRequest(mission.id, options.ownerId, {
         interruptProvider: true,
@@ -277,6 +296,20 @@ export class MissionRuntime {
         });
         mission = execution.mission;
         lastAttempt = execution.attempt;
+        this.saveEnvironmentStamp(mission, execution.attempt, workspace);
+        this.saveCheckpointRecord(
+          mission,
+          execution.attempt,
+          'attempt.started',
+          `Attempt #${execution.attempt.index} is ready to run.`,
+          {
+            workflowPath: workflow.source.path,
+            workflowHash: workflow.hash,
+            providerThreadId: execution.attempt.providerThreadId,
+            promptDigest: execution.attempt.promptDigest,
+            workspacePath: workspace.workspacePath,
+          },
+        );
 
         const providerRun = await this.runProviderUntilCandidateOrTerminal({
           mission,
@@ -326,6 +359,9 @@ export class MissionRuntime {
       this.appendMissionEvent(mission, 'mission.failed', summary, lastAttempt, {
         error: summary,
         cycleResult,
+      });
+      this.saveCheckpointRecord(mission, lastAttempt, 'runtime.exception', summary, {
+        error: summary,
       });
       return this.finalizeRun(mission, options.ownerId, initialEventCount, {
         attempt: lastAttempt,
@@ -550,6 +586,9 @@ export class MissionRuntime {
           budgetExceededReasons: [...turnIssues],
           cycleResult,
         });
+        this.saveCheckpointRecord(mission, failedAttempt, 'runtime.turn_budget', failedResult.summary, {
+          budgetExceededReasons: [...turnIssues],
+        });
         return {
           mission,
           attempt: failedAttempt,
@@ -668,6 +707,12 @@ export class MissionRuntime {
           outcome: providerResult.outcome,
           cycleResult,
         });
+        this.saveCheckpointRecord(mission, attempt, 'provider.continuation', 'Mission scheduled a continuation turn.', {
+          turnIndex,
+          outcome: providerResult.outcome,
+          providerRunId: attempt.providerRunId,
+          continuationEligible: providerResult.continuationEligible,
+        });
         continue;
       }
 
@@ -715,6 +760,17 @@ export class MissionRuntime {
             cycleResult,
           },
         );
+        this.saveCheckpointRecord(
+          mission,
+          endedAttempt,
+          `provider.${nextStatus}`,
+          providerResult.stopReason ?? providerResult.previewText ?? providerResult.text ?? 'Mission blocked.',
+          {
+            providerRunId: endedAttempt.providerRunId,
+            handoffState: providerResult.handoffState,
+            outcome: providerResult.outcome,
+          },
+        );
         return {
           mission,
           attempt: endedAttempt,
@@ -753,6 +809,10 @@ export class MissionRuntime {
         this.appendMissionEvent(mission, 'mission.stopped', providerResult.stopReason ?? 'Mission stopped.', endedAttempt, {
           providerRunId: endedAttempt.providerRunId,
           cycleResult,
+        });
+        this.saveCheckpointRecord(mission, endedAttempt, 'provider.stopped', providerResult.stopReason ?? 'Mission stopped.', {
+          providerRunId: endedAttempt.providerRunId,
+          outcome: providerResult.outcome,
         });
         return {
           mission,
@@ -795,6 +855,10 @@ export class MissionRuntime {
           outcome: providerResult.outcome,
           cycleResult,
         });
+        this.saveCheckpointRecord(mission, endedAttempt, 'provider.failed', summary, {
+          providerRunId: endedAttempt.providerRunId,
+          outcome: providerResult.outcome,
+        });
         return {
           mission,
           attempt: endedAttempt,
@@ -833,6 +897,18 @@ export class MissionRuntime {
       this.appendMissionEvent(mission, 'mission.verifying', 'Mission is waiting for verifier output.', verifyingAttempt, {
         providerRunId: verifyingAttempt.providerRunId,
       });
+      this.saveCheckpointRecord(
+        mission,
+        verifyingAttempt,
+        'provider.candidate_ready',
+        'Provider returned a candidate result for verification.',
+        {
+          providerRunId: verifyingAttempt.providerRunId,
+          artifactCount: providerResult.artifacts.length,
+          artifactBytes,
+          outcome: providerResult.outcome,
+        },
+      );
       return {
         mission,
         attempt: verifyingAttempt,
@@ -1008,6 +1084,13 @@ export class MissionRuntime {
         budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
         cycleResult,
       });
+      this.saveCheckpointRecord(mission, updatedAttempt, 'verifier.continue_item', continuationSummary, {
+        verdict: effectiveResult.verdict,
+        completedItemId: activeChecklistItem?.id ?? null,
+        completedItemTitle: activeChecklistItem?.title ?? null,
+        missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+        budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+      });
       return {
         mission,
         attempt: updatedAttempt,
@@ -1045,6 +1128,10 @@ export class MissionRuntime {
       this.appendMissionEvent(mission, 'mission.retrying', effectiveResult.summary, updatedAttempt, {
         missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
         cycleResult,
+      });
+      this.saveCheckpointRecord(mission, updatedAttempt, 'verifier.repair', effectiveResult.summary, {
+        verdict: effectiveResult.verdict,
+        missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
       });
     } else {
       const cycleStatus = mapMissionStatusToMissionControlOutcome(mission.status) ?? 'failed';
@@ -1085,6 +1172,12 @@ export class MissionRuntime {
           cycleResult,
         },
       );
+      this.saveCheckpointRecord(mission, updatedAttempt, `verifier.${effectiveResult.verdict}`, effectiveResult.summary, {
+        verdict: effectiveResult.verdict,
+        missionStatus: mission.status,
+        missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+        budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+      });
     }
 
     return {
@@ -1414,6 +1507,10 @@ export class MissionRuntime {
       attemptCount: mission.attemptCount,
       cycleResult,
     });
+    this.saveCheckpointRecord(savedMission, latestAttempt, 'runtime.max_cycles', summary, {
+      maxCycles,
+      attemptCount: mission.attemptCount,
+    });
     return savedMission;
   }
 
@@ -1466,6 +1563,64 @@ export class MissionRuntime {
       evidence: input.evidence,
       eventSeq: existingEvents.length + 1,
       updatedAt: this.now(),
+    });
+  }
+
+  private saveEnvironmentStamp(
+    mission: Mission,
+    attempt: MissionAttempt,
+    workspace: MissionWorkspaceAssignment,
+  ): MissionEnvironmentStamp {
+    const capturedAt = this.now();
+    const git = resolveMissionGitMetadata(workspace.workspacePath, mission.cwd);
+    return this.repository.saveEnvironmentStamp({
+      id: buildMissionEnvironmentStampId(mission.id, attempt.id),
+      missionId: mission.id,
+      generationId: attempt.generationId ?? mission.activeGenerationId,
+      generationIndex: attempt.generationIndex ?? mission.activeGenerationIndex,
+      attemptId: attempt.id,
+      cycle: attempt.index,
+      cwd: mission.cwd,
+      workspacePath: workspace.workspacePath,
+      gitSha: git.gitSha,
+      gitBranch: git.gitBranch,
+      workflowHash: mission.workflowHash,
+      providerProfileId: mission.providerProfileId,
+      capturedAt,
+    });
+  }
+
+  private saveCheckpointRecord(
+    mission: Mission,
+    attempt: MissionAttempt | null,
+    stage: string,
+    summary: string,
+    payload: Record<string, unknown>,
+  ): MissionCheckpoint {
+    const createdAt = this.now();
+    const generationId = attempt?.generationId ?? mission.activeGenerationId;
+    const generationIndex = attempt?.generationIndex ?? mission.activeGenerationIndex;
+    const cycle = attempt?.index ?? Math.max(1, mission.attemptCount);
+    return this.repository.saveCheckpoint({
+      id: buildMissionCheckpointId(mission.id, this.repository.listCheckpoints(mission.id).length + 1),
+      missionId: mission.id,
+      attemptId: attempt?.id ?? null,
+      generationId,
+      generationIndex,
+      cycle,
+      stage,
+      summary,
+      payload: {
+        ...payload,
+        missionStatus: mission.status,
+        statusReason: mission.statusReason,
+        checklistSnapshotId: mission.currentChecklistSnapshotId,
+        checklistSnapshotVersion: mission.currentChecklistSnapshotVersion,
+        workflowPath: mission.workflowPath,
+        workflowHash: mission.workflowHash,
+        resolverReason: mission.workflowResolverReason,
+      },
+      createdAt,
     });
   }
 
@@ -1579,6 +1734,12 @@ export class MissionRuntime {
       actorId: mission.stopRequest.actorId,
       actorType: mission.stopRequest.actorType,
     });
+    this.saveCheckpointRecord(stoppedMission, attempt, 'control.stop_consumed', reason, {
+      stopRequestId: mission.stopRequest.requestId,
+      actorId: mission.stopRequest.actorId,
+      actorType: mission.stopRequest.actorType,
+      interruptedProvider: options.interruptProvider,
+    });
     stoppedMission = this.releaseLeaseSafely(stoppedMission.id, ownerId);
     return {
       mission: stoppedMission,
@@ -1666,6 +1827,57 @@ function mapMissionTerminalStatusToEventKind(status: Mission['status']): Mission
       return 'mission.stopped';
     default:
       return 'mission.progress';
+  }
+}
+
+function buildMissionEnvironmentStampId(missionId: string, attemptId: string): string {
+  return `${missionId}:env:${attemptId}`;
+}
+
+function buildMissionCheckpointId(missionId: string, ordinal: number): string {
+  return `${missionId}:checkpoint:${Math.max(1, Math.trunc(ordinal))}`;
+}
+
+function resolveMissionGitMetadata(
+  workspacePath: string | null,
+  cwd: string | null,
+): {
+  gitSha: string | null;
+  gitBranch: string | null;
+} {
+  const candidates = [normalizeText(workspacePath), normalizeText(cwd)].filter(
+    (value): value is string => value !== null,
+  );
+  for (const candidate of candidates) {
+    const gitSha = runGitMetadataCommand(candidate, ['rev-parse', 'HEAD']);
+    if (!gitSha) {
+      continue;
+    }
+    const gitBranch = runGitMetadataCommand(candidate, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    return {
+      gitSha,
+      gitBranch,
+    };
+  }
+  return {
+    gitSha: null,
+    gitBranch: null,
+  };
+}
+
+function runGitMetadataCommand(cwd: string, args: string[]): string | null {
+  try {
+    const result = spawnSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.status !== 0) {
+      return null;
+    }
+    return normalizeText(result.stdout);
+  } catch {
+    return null;
   }
 }
 

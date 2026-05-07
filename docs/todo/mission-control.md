@@ -891,13 +891,26 @@ workflow-selection trace metadata:
 - package execution/query views now expose that trace metadata without forcing
   hosts to infer workflow provenance from local path conventions
 
-Phase 9s is still open: the remaining Phase 9 gaps are first-host proactive
-notifications plus persisted environment-stamp/checkpoint records. The first
-host can already query package-backed loop snapshots on demand, but it does not
-yet provide a policy-driven proactive notification path that pushes those same
-cycle/stage/completion snapshots back to the user after meaningful mission loop
-events, and the package still needs formal persisted environment/checkpoint
-artifacts for recovery/audit.
+Phase 9s landed: Mission Control now persists formal package-owned
+environment-stamp and checkpoint records for recovery/audit:
+
+- the runtime captures `MissionEnvironmentStamp` records per attempt so hosts
+  and operators can inspect authoritative `cwd`, `workspacePath`, `gitSha`,
+  `gitBranch`, `workflowHash`, and `providerProfileId` context without reading
+  bridge-local shell state
+- the runtime now appends formal `MissionCheckpoint` records at meaningful
+  boundaries such as workspace readiness, attempt start, provider candidate
+  handoff, verifier repair/complete outcomes, stop reconciliation, and loop
+  budget/runtime failures
+- package-owned mission detail/execution/timeline views now expose those same
+  environment/checkpoint artifacts directly, and bridge compatibility
+  projections persist them through `missionRuntimeState`
+
+Phase 9t is still open: the remaining Phase 9 gap is first-host proactive
+notifications. The first host can already query package-backed loop snapshots
+on demand, but it does not yet provide a policy-driven proactive notification
+path that pushes those same cycle/stage/completion snapshots back to the user
+after meaningful mission loop events.
 
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
@@ -969,7 +982,7 @@ artifacts for recovery/audit.
   - [x] stale-run recovery
   - [x] history retention
   - [x] checkpoint/continuation semantics
-- [ ] Persist package-owned `MissionEnvironmentStamp` records so operators and
+- [x] Persist package-owned `MissionEnvironmentStamp` records so operators and
   hosts can inspect execution context such as:
   - `cwd`
   - `workspacePath`
@@ -977,7 +990,7 @@ artifacts for recovery/audit.
   - `gitBranch`
   - `workflowHash`
   - `providerProfileId`
-- [ ] Persist formal package-owned `MissionCheckpoint` records at meaningful
+- [x] Persist formal package-owned `MissionCheckpoint` records at meaningful
   recovery boundaries instead of relying only on derived snapshots/workpad
   state
 - [x] Reduce long-lived reliance on external `loop.sh` to an operational
@@ -991,7 +1004,7 @@ Completion criteria:
   supervision semantics
 - [x] Workflow selection and overrides are deterministic and traceable through
   package-owned resolver metadata
-- [ ] Environment-stamp and checkpoint records are persisted as package-owned
+- [x] Environment-stamp and checkpoint records are persisted as package-owned
   runtime artifacts for recovery/audit
 - [x] External shell supervision is optional, not structurally required
 - [x] The concrete package commands/status model converges with the formal spec

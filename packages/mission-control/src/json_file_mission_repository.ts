@@ -12,6 +12,8 @@ import type {
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
   MissionEvent,
   MissionGeneration,
   PlanChangeRequest,
@@ -25,6 +27,8 @@ type JsonState = {
   checklistSnapshots: ChecklistSnapshot[];
   planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
+  environmentStamps: MissionEnvironmentStamp[];
+  checkpoints: MissionCheckpoint[];
   events: MissionEvent[];
 };
 
@@ -35,6 +39,8 @@ const DEFAULT_JSON_STATE: JsonState = {
   checklistSnapshots: [],
   planChangeRequests: [],
   attempts: [],
+  environmentStamps: [],
+  checkpoints: [],
   events: [],
 };
 
@@ -84,6 +90,8 @@ export class JsonFileMissionRepository implements MissionRepository {
       checklistSnapshots: state.checklistSnapshots.filter((snapshot) => snapshot.missionId !== mission.id),
       planChangeRequests: state.planChangeRequests.filter((changeRequest) => changeRequest.missionId !== mission.id),
       attempts: state.attempts.filter((attempt) => attempt.missionId !== mission.id),
+      environmentStamps: state.environmentStamps.filter((stamp) => stamp.missionId !== mission.id),
+      checkpoints: state.checkpoints.filter((checkpoint) => checkpoint.missionId !== mission.id),
       events: state.events.filter((event) => event.missionId !== mission.id),
     })).missions.find((entry) => entry.id === mission.id) ?? mission;
   }
@@ -148,6 +156,36 @@ export class JsonFileMissionRepository implements MissionRepository {
     })).attempts.find((entry) => entry.id === attempt.id) ?? attempt;
   }
 
+  getEnvironmentStampById(id: string): MissionEnvironmentStamp | null {
+    return this.loadState().environmentStamps.find((stamp) => stamp.id === id) ?? null;
+  }
+
+  listEnvironmentStamps(missionId: string): MissionEnvironmentStamp[] {
+    return this.loadState().environmentStamps.filter((stamp) => stamp.missionId === missionId);
+  }
+
+  saveEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+    return this.updateState((state) => ({
+      ...state,
+      environmentStamps: upsertById(state.environmentStamps, stamp),
+    })).environmentStamps.find((entry) => entry.id === stamp.id) ?? stamp;
+  }
+
+  getCheckpointById(id: string): MissionCheckpoint | null {
+    return this.loadState().checkpoints.find((checkpoint) => checkpoint.id === id) ?? null;
+  }
+
+  listCheckpoints(missionId: string): MissionCheckpoint[] {
+    return this.loadState().checkpoints.filter((checkpoint) => checkpoint.missionId === missionId);
+  }
+
+  saveCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+    return this.updateState((state) => ({
+      ...state,
+      checkpoints: upsertById(state.checkpoints, checkpoint),
+    })).checkpoints.find((entry) => entry.id === checkpoint.id) ?? checkpoint;
+  }
+
   listEvents(missionId: string): MissionEvent[] {
     return this.loadState().events.filter((event) => event.missionId === missionId);
   }
@@ -185,6 +223,12 @@ export class JsonFileMissionRepository implements MissionRepository {
           : [],
         attempts: Array.isArray(parsed.attempts)
           ? parsed.attempts.map((attempt) => normalizeAttempt(cloneValue(attempt)))
+          : [],
+        environmentStamps: Array.isArray(parsed.environmentStamps)
+          ? parsed.environmentStamps.map((stamp) => normalizeEnvironmentStamp(cloneValue(stamp)))
+          : [],
+        checkpoints: Array.isArray(parsed.checkpoints)
+          ? parsed.checkpoints.map((checkpoint) => normalizeCheckpoint(cloneValue(checkpoint)))
           : [],
         events: Array.isArray(parsed.events)
           ? parsed.events.map((event) => normalizeEvent(cloneValue(event)))
@@ -233,6 +277,39 @@ function normalizeAttempt(attempt: MissionAttempt): MissionAttempt {
     workflowPath: typeof attempt.workflowPath === 'string' ? attempt.workflowPath : null,
     workflowHash: normalizeWorkflowHash(attempt.workflowHash),
     resolverReason: normalizeWorkflowResolverReason(attempt.resolverReason),
+  };
+}
+
+function normalizeEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+  return {
+    ...stamp,
+    attemptId: typeof stamp.attemptId === 'string' ? stamp.attemptId : null,
+    cwd: typeof stamp.cwd === 'string' ? stamp.cwd : null,
+    workspacePath: typeof stamp.workspacePath === 'string' ? stamp.workspacePath : null,
+    gitSha: normalizeGitSha(stamp.gitSha),
+    gitBranch: typeof stamp.gitBranch === 'string' ? stamp.gitBranch : null,
+    workflowHash: normalizeWorkflowHash(stamp.workflowHash),
+    providerProfileId: typeof stamp.providerProfileId === 'string' ? stamp.providerProfileId : null,
+    generationIndex: normalizePositiveInteger(stamp.generationIndex) ?? 1,
+    cycle: normalizePositiveInteger(stamp.cycle) ?? 1,
+    capturedAt: normalizePositiveInteger(stamp.capturedAt) ?? Date.now(),
+  };
+}
+
+function normalizeCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+  return {
+    ...checkpoint,
+    attemptId: typeof checkpoint.attemptId === 'string' ? checkpoint.attemptId : null,
+    generationIndex: normalizePositiveInteger(checkpoint.generationIndex) ?? 1,
+    cycle: normalizePositiveInteger(checkpoint.cycle) ?? 1,
+    stage: typeof checkpoint.stage === 'string' && checkpoint.stage.trim().length > 0
+      ? checkpoint.stage.trim()
+      : 'runtime.unknown',
+    summary: typeof checkpoint.summary === 'string' && checkpoint.summary.trim().length > 0
+      ? checkpoint.summary.trim()
+      : 'Mission checkpoint recorded.',
+    payload: isRecord(checkpoint.payload) ? cloneValue(checkpoint.payload) : {},
+    createdAt: normalizePositiveInteger(checkpoint.createdAt) ?? Date.now(),
   };
 }
 
@@ -307,6 +384,14 @@ function normalizePositiveInteger(value: number | null | undefined): number | nu
   }
   const normalized = Math.trunc(value);
   return normalized > 0 ? normalized : null;
+}
+
+function normalizeGitSha(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().toLowerCase();
+  return /^[a-f0-9]{40,64}$/.test(trimmed) ? trimmed : null;
 }
 
 function normalizeWorkItem(workItem: WorkItem): WorkItem {

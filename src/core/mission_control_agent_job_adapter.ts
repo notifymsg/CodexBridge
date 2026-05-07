@@ -18,6 +18,8 @@ import {
   type Mission,
   type MissionAttempt,
   type MissionAttemptStatus,
+  type MissionCheckpoint,
+  type MissionEnvironmentStamp,
   type MissionEvent,
   type MissionGeneration,
   type PlanChangeRequest,
@@ -63,6 +65,8 @@ export interface AgentJobMissionRuntimeStateView {
   checklistSnapshots: ChecklistSnapshot[];
   planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
+  environmentStamps: MissionEnvironmentStamp[];
+  checkpoints: MissionCheckpoint[];
   events: MissionEvent[];
 }
 
@@ -73,6 +77,8 @@ type AgentJobMissionRuntimeStateLike = {
   checklistSnapshots?: ChecklistSnapshot[];
   planChangeRequests?: PlanChangeRequest[];
   attempts?: MissionAttempt[];
+  environmentStamps?: MissionEnvironmentStamp[];
+  checkpoints?: MissionCheckpoint[];
   events?: MissionEvent[];
 };
 
@@ -206,6 +212,12 @@ export function loadAgentJobMissionRuntimeState(job: AgentJob): AgentJobMissionR
     attempts: Array.isArray(raw?.attempts)
       ? raw.attempts.map((attempt) => cloneValue(attempt as unknown as MissionAttempt))
       : [],
+    environmentStamps: Array.isArray(raw?.environmentStamps)
+      ? raw.environmentStamps.map((stamp) => cloneValue(stamp as unknown as MissionEnvironmentStamp))
+      : [],
+    checkpoints: Array.isArray(raw?.checkpoints)
+      ? raw.checkpoints.map((checkpoint) => cloneValue(checkpoint as unknown as MissionCheckpoint))
+      : [],
     events: Array.isArray(raw?.events)
       ? raw.events.map((event) => cloneValue(event as unknown as MissionEvent))
       : [],
@@ -222,6 +234,8 @@ export function serializeAgentJobMissionRuntimeState(
     checklistSnapshots: (state.checklistSnapshots ?? []).map((snapshot) => cloneValue(snapshot) as unknown as Record<string, unknown>),
     planChangeRequests: (state.planChangeRequests ?? []).map((changeRequest) => cloneValue(changeRequest) as unknown as Record<string, unknown>),
     attempts: (state.attempts ?? []).map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
+    environmentStamps: (state.environmentStamps ?? []).map((stamp) => cloneValue(stamp) as unknown as Record<string, unknown>),
+    checkpoints: (state.checkpoints ?? []).map((checkpoint) => cloneValue(checkpoint) as unknown as Record<string, unknown>),
     events: (state.events ?? []).map((event) => cloneValue(event) as unknown as Record<string, unknown>),
   };
 }
@@ -271,6 +285,8 @@ export function createFreshMissionRuntimeStateForAgentJob(
     })],
     planChangeRequests: [],
     attempts: [],
+    environmentStamps: [],
+    checkpoints: [],
     events: [],
   };
 }
@@ -314,6 +330,8 @@ export function createProjectedMissionRuntimeStateForAgentJob(
     })],
     planChangeRequests: [],
     attempts,
+    environmentStamps: [],
+    checkpoints: [],
     events: [],
   };
 }
@@ -357,6 +375,8 @@ export function createRetriedMissionRuntimeStateForAgentJob(
     ).sort((left, right) => left.version - right.version),
     planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest)),
     attempts: state.attempts.map((attempt) => cloneValue(attempt)),
+    environmentStamps: state.environmentStamps.map((stamp) => cloneValue(stamp)),
+    checkpoints: state.checkpoints.map((checkpoint) => cloneValue(checkpoint)),
     events: state.events.map((event) => cloneValue(event)),
   };
 }
@@ -383,6 +403,8 @@ export function createResumedMissionRuntimeStateForAgentJob(
     checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot)),
     planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest)),
     attempts: state.attempts.map((attempt) => cloneValue(attempt)),
+    environmentStamps: state.environmentStamps.map((stamp) => cloneValue(stamp)),
+    checkpoints: state.checkpoints.map((checkpoint) => cloneValue(checkpoint)),
     events: state.events.map((event) => cloneValue(event)),
   };
 }
@@ -436,6 +458,8 @@ export function createStoppedMissionRuntimeStateForAgentJob(
         updatedAt: now,
       };
     }),
+    environmentStamps: state.environmentStamps.map((stamp) => cloneValue(stamp)),
+    checkpoints: state.checkpoints.map((checkpoint) => cloneValue(checkpoint)),
     events: state.events.map((event) => cloneValue(event)),
   };
 }
@@ -500,6 +524,10 @@ function createMissionFromAgentJob(
     cwd: job.cwd,
     workspacePath: null,
     workflowPath: options.workflow?.source.path ?? job.missionWorkflowPath ?? null,
+    workflowHash: options.workflow?.hash ?? null,
+    workflowResolverReason: options.workflow?.source.path
+      ? 'explicit_override'
+      : null,
     providerProfileId: job.providerProfileId,
     bridgeSessionId: job.bridgeSessionId,
     codexThreadId: null,
@@ -555,6 +583,9 @@ function createSyntheticAttempt(
     status,
     providerRunId: null,
     providerThreadId: null,
+    workflowPath: job.missionWorkflowPath ?? null,
+    workflowHash: null,
+    resolverReason: job.missionWorkflowPath ? 'explicit_override' : null,
     promptDigest: null,
     verifierVerdict: null,
     verifierSummary: job.verificationSummary,
@@ -579,6 +610,9 @@ function createSyntheticAttemptFromHistory(job: AgentJob, entry: AgentJobAttempt
     status: mapAgentStatusToMissionAttemptStatus(entry.status),
     providerRunId: null,
     providerThreadId: null,
+    workflowPath: job.missionWorkflowPath ?? null,
+    workflowHash: null,
+    resolverReason: job.missionWorkflowPath ? 'explicit_override' : null,
     promptDigest: null,
     verifierVerdict: inferVerifierVerdict(entry.status, entry.verifierSummary),
     verifierSummary: entry.verifierSummary,

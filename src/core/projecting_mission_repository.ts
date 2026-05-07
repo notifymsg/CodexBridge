@@ -107,6 +107,34 @@ export class ProjectingMissionRepository implements MissionRepository {
     return saved;
   }
 
+  getEnvironmentStampById(id: string) {
+    return this.authority.getEnvironmentStampById(id);
+  }
+
+  listEnvironmentStamps(missionId: string) {
+    return this.authority.listEnvironmentStamps(missionId);
+  }
+
+  saveEnvironmentStamp(stamp: Parameters<MissionRepository['saveEnvironmentStamp']>[0]) {
+    const saved = this.authority.saveEnvironmentStamp(stamp);
+    this.syncProjection(saved.missionId);
+    return saved;
+  }
+
+  getCheckpointById(id: string) {
+    return this.authority.getCheckpointById(id);
+  }
+
+  listCheckpoints(missionId: string) {
+    return this.authority.listCheckpoints(missionId);
+  }
+
+  saveCheckpoint(checkpoint: Parameters<MissionRepository['saveCheckpoint']>[0]) {
+    const saved = this.authority.saveCheckpoint(checkpoint);
+    this.syncProjection(saved.missionId);
+    return saved;
+  }
+
   listEvents(missionId: string) {
     return this.authority.listEvents(missionId);
   }

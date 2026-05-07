@@ -272,15 +272,24 @@ Current convergence status:
   confirmation, paused-state continuation, plan-change resolution, loop
   snapshot, and supervision semantics, so the Mission Control/CodexBridge v0
   integration boundary is intentionally stable for query/confirm/stop flows
+- Phase 9s now adds persisted environment/checkpoint artifacts on top of that
+  package/runtime boundary:
+  - Mission Control persists package-owned `MissionEnvironmentStamp` records
+    per attempt plus formal `MissionCheckpoint` records at meaningful runtime
+    boundaries such as workspace readiness, attempt start, provider candidate
+    handoff, verifier outcomes, stop reconciliation, and loop-budget/runtime
+    failures
+  - package mission detail/execution/timeline views now expose those same
+    artifacts directly, so later hosts and operators can inspect recovery/audit
+    context without reconstructing it from bridge-local shell/session state
+  - bridge compatibility projections now retain those environment/checkpoint
+    artifacts inside `missionRuntimeState`, but they remain package-owned
+    runtime truth rather than a new bridge authority
 - the remaining Phase 9 gaps are now:
   - policy-driven proactive notification:
     package-backed loop snapshots can already be queried on demand, but the
     `/agent` host path still does not wire mission-cycle/status notifications
     through its host adapter/send path as a first-class user-facing behavior
-  - persisted environment/checkpoint artifacts:
-    Mission Control still needs formal package-owned environment-stamp and
-    checkpoint records for recovery/audit instead of relying only on derived
-    snapshots, workpad state, and workspace layout helpers
 - broader issue/board sources, service exposure, and later providers remain
   explicitly deferred; they should not reopen bridge-owned runtime truth or
   weaken the current package/host adapter split when work resumes

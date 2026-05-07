@@ -65,6 +65,8 @@ export function readMissionRuntimeStateFromRepository(
     checklistSnapshots: repository.listChecklistSnapshots(missionId).sort((left, right) => left.version - right.version),
     planChangeRequests: repository.listPlanChangeRequests(missionId).sort((left, right) => left.createdAt - right.createdAt),
     attempts: sortAttempts(repository.listAttempts(missionId)),
+    environmentStamps: repository.listEnvironmentStamps(missionId).sort((left, right) => left.capturedAt - right.capturedAt),
+    checkpoints: repository.listCheckpoints(missionId).sort((left, right) => left.createdAt - right.createdAt),
     events: repository.listEvents(missionId).sort((left, right) => left.createdAt - right.createdAt),
   };
 }
@@ -94,6 +96,12 @@ export function persistMissionRuntimeStateToRepository(
   }
   for (const attempt of sortAttempts(state.attempts)) {
     repository.saveAttempt(attempt);
+  }
+  for (const stamp of state.environmentStamps.slice().sort((left, right) => left.capturedAt - right.capturedAt)) {
+    repository.saveEnvironmentStamp(stamp);
+  }
+  for (const checkpoint of state.checkpoints.slice().sort((left, right) => left.createdAt - right.createdAt)) {
+    repository.saveCheckpoint(checkpoint);
   }
   for (const event of state.events.slice().sort((left, right) => left.createdAt - right.createdAt)) {
     repository.appendEvent(event);
@@ -153,6 +161,8 @@ export function emptyMissionRuntimeState(): AgentJobMissionProjectionState {
     checklistSnapshots: [],
     planChangeRequests: [],
     attempts: [],
+    environmentStamps: [],
+    checkpoints: [],
     events: [],
   };
 }

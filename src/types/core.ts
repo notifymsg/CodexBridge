@@ -204,6 +204,8 @@ export interface MissionRuntimeStateSnapshot {
   generations?: Record<string, unknown>[];
   checklistSnapshots?: Record<string, unknown>[];
   planChangeRequests?: Record<string, unknown>[];
+  environmentStamps?: Record<string, unknown>[];
+  checkpoints?: Record<string, unknown>[];
   attempts: Record<string, unknown>[];
   events: Record<string, unknown>[];
 }

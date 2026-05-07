@@ -944,6 +944,36 @@ test('direct mission control api exposes package-owned query views with boundary
   }));
   repo.savePlanChangeRequest(planChangeRequest);
   repo.saveAttempt(attempt);
+  repo.saveEnvironmentStamp({
+    id: `${verifying.id}:env:${attempt.id}`,
+    missionId: verifying.id,
+    generationId: verifying.activeGenerationId,
+    generationIndex: verifying.activeGenerationIndex,
+    attemptId: attempt.id,
+    cycle: 1,
+    cwd: '/repo',
+    workspacePath: '/tmp/mission-api-existing',
+    gitSha: 'abcdef0123456789abcdef0123456789abcdef01',
+    gitBranch: 'track/mission-control',
+    workflowHash: verifying.workflowHash,
+    providerProfileId: verifying.providerProfileId,
+    capturedAt: nowRef.value + 30,
+  });
+  repo.saveCheckpoint({
+    id: `${verifying.id}:checkpoint:1`,
+    missionId: verifying.id,
+    attemptId: attempt.id,
+    generationId: verifying.activeGenerationId,
+    generationIndex: verifying.activeGenerationIndex,
+    cycle: 1,
+    stage: 'provider.candidate_ready',
+    summary: 'Provider returned a candidate result for verification.',
+    payload: {
+      providerRunId: attempt.providerRunId,
+      workflowHash: verifying.workflowHash,
+    },
+    createdAt: nowRef.value + 32,
+  });
   repo.appendEvent(event);
 
   const listResult = await api.queries.listMissionSummaries({
@@ -997,6 +1027,10 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(detailResult.data?.currentChecklistSnapshot?.id, verifying.currentChecklistSnapshotId);
   assert.equal(detailResult.data?.planChangeRequests.length, 1);
   assert.equal(detailResult.data?.attempts.length, 1);
+  assert.equal(detailResult.data?.environmentStamps.length, 1);
+  assert.equal(detailResult.data?.environmentStamps[0]?.workspacePath, '/tmp/mission-api-existing');
+  assert.equal(detailResult.data?.checkpoints.length, 1);
+  assert.equal(detailResult.data?.checkpoints[0]?.stage, 'provider.candidate_ready');
   assert.equal(detailResult.data?.latestCycleResult?.stage, 'verifier.repair');
   assert.equal(detailResult.data?.loopSnapshot.loopStatus, 'retry');
   assert.equal(detailResult.data?.loopSnapshot.currentItemTitle, 'Patch exists');
@@ -1022,10 +1056,10 @@ test('direct mission control api exposes package-owned query views with boundary
       missionId: verifying.id,
     },
   });
-  assert.equal(timelineResult.data?.entries.length, 5);
+  assert.equal(timelineResult.data?.entries.length, 7);
   assert.deepEqual(
     timelineResult.data?.entries.map((entry) => entry.type),
-    ['generation', 'checklist_snapshot', 'attempt', 'plan_change_request', 'event'],
+    ['generation', 'checklist_snapshot', 'attempt', 'environment_stamp', 'plan_change_request', 'checkpoint', 'event'],
   );
 
   const attemptsResult = await api.queries.getMissionAttempts({
@@ -1061,6 +1095,9 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(executionResult.data?.executionRefs.resolverReason, 'explicit_override');
   assert.equal(executionResult.data?.artifactRefs[0]?.name, 'report.md');
   assert.equal(executionResult.data?.latestCycleResult?.audit.eventSeq, 1);
+  assert.equal(executionResult.data?.latestEnvironmentStamp?.workspacePath, '/tmp/mission-api-existing');
+  assert.equal(executionResult.data?.latestEnvironmentStamp?.gitBranch, 'track/mission-control');
+  assert.equal(executionResult.data?.latestCheckpoint?.stage, 'provider.candidate_ready');
   assert.equal(executionResult.data?.loopSnapshot.status, 'verifying');
   assert.equal(executionResult.data?.loopSnapshot.currentCycle, 1);
   assert.equal(executionResult.data?.loopSnapshot.currentStage, 'verifier.repair');

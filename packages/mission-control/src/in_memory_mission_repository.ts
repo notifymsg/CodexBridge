@@ -10,6 +10,8 @@ import type {
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
   MissionEvent,
   MissionGeneration,
   PlanChangeRequest,
@@ -23,6 +25,8 @@ type InMemoryState = {
   checklistSnapshots: ChecklistSnapshot[];
   planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
+  environmentStamps: MissionEnvironmentStamp[];
+  checkpoints: MissionCheckpoint[];
   events: MissionEvent[];
 };
 
@@ -33,6 +37,8 @@ const DEFAULT_STATE: InMemoryState = {
   checklistSnapshots: [],
   planChangeRequests: [],
   attempts: [],
+  environmentStamps: [],
+  checkpoints: [],
   events: [],
 };
 
@@ -81,6 +87,8 @@ export class InMemoryMissionRepository implements MissionRepository {
     this.state.checklistSnapshots = this.state.checklistSnapshots.filter((snapshot) => snapshot.missionId !== mission.id);
     this.state.planChangeRequests = this.state.planChangeRequests.filter((changeRequest) => changeRequest.missionId !== mission.id);
     this.state.attempts = this.state.attempts.filter((attempt) => attempt.missionId !== mission.id);
+    this.state.environmentStamps = this.state.environmentStamps.filter((stamp) => stamp.missionId !== mission.id);
+    this.state.checkpoints = this.state.checkpoints.filter((checkpoint) => checkpoint.missionId !== mission.id);
     this.state.events = this.state.events.filter((event) => event.missionId !== mission.id);
     return cloneValue(mission);
   }
@@ -145,6 +153,36 @@ export class InMemoryMissionRepository implements MissionRepository {
     return cloneValue(attempt);
   }
 
+  getEnvironmentStampById(id: string): MissionEnvironmentStamp | null {
+    return this.state.environmentStamps.find((stamp) => stamp.id === id) ?? null;
+  }
+
+  listEnvironmentStamps(missionId: string): MissionEnvironmentStamp[] {
+    return this.state.environmentStamps
+      .filter((stamp) => stamp.missionId === missionId)
+      .map((stamp) => cloneValue(stamp));
+  }
+
+  saveEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+    this.state.environmentStamps = upsertById(this.state.environmentStamps, stamp);
+    return cloneValue(stamp);
+  }
+
+  getCheckpointById(id: string): MissionCheckpoint | null {
+    return this.state.checkpoints.find((checkpoint) => checkpoint.id === id) ?? null;
+  }
+
+  listCheckpoints(missionId: string): MissionCheckpoint[] {
+    return this.state.checkpoints
+      .filter((checkpoint) => checkpoint.missionId === missionId)
+      .map((checkpoint) => cloneValue(checkpoint));
+  }
+
+  saveCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+    this.state.checkpoints = upsertById(this.state.checkpoints, checkpoint);
+    return cloneValue(checkpoint);
+  }
+
   listEvents(missionId: string): MissionEvent[] {
     return this.state.events
       .filter((event) => event.missionId === missionId)
@@ -174,6 +212,12 @@ function normalizeState(state: InMemoryState): InMemoryState {
     planChangeRequests: Array.isArray(state.planChangeRequests) ? cloneValue(state.planChangeRequests) : [],
     attempts: Array.isArray(state.attempts)
       ? state.attempts.map((attempt) => normalizeAttempt(cloneValue(attempt)))
+      : [],
+    environmentStamps: Array.isArray(state.environmentStamps)
+      ? state.environmentStamps.map((stamp) => normalizeEnvironmentStamp(cloneValue(stamp)))
+      : [],
+    checkpoints: Array.isArray(state.checkpoints)
+      ? state.checkpoints.map((checkpoint) => normalizeCheckpoint(cloneValue(checkpoint)))
       : [],
     events: Array.isArray(state.events) ? cloneValue(state.events) : [],
   };
@@ -245,6 +289,39 @@ function normalizeAttempt(attempt: MissionAttempt): MissionAttempt {
   };
 }
 
+function normalizeEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+  return {
+    ...stamp,
+    attemptId: typeof stamp.attemptId === 'string' ? stamp.attemptId : null,
+    cwd: typeof stamp.cwd === 'string' ? stamp.cwd : null,
+    workspacePath: typeof stamp.workspacePath === 'string' ? stamp.workspacePath : null,
+    gitSha: normalizeGitSha(stamp.gitSha),
+    gitBranch: typeof stamp.gitBranch === 'string' ? stamp.gitBranch : null,
+    workflowHash: normalizeWorkflowHash(stamp.workflowHash),
+    providerProfileId: typeof stamp.providerProfileId === 'string' ? stamp.providerProfileId : null,
+    generationIndex: normalizePositiveInteger(stamp.generationIndex) ?? 1,
+    cycle: normalizePositiveInteger(stamp.cycle) ?? 1,
+    capturedAt: normalizePositiveInteger(stamp.capturedAt) ?? Date.now(),
+  };
+}
+
+function normalizeCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+  return {
+    ...checkpoint,
+    attemptId: typeof checkpoint.attemptId === 'string' ? checkpoint.attemptId : null,
+    generationIndex: normalizePositiveInteger(checkpoint.generationIndex) ?? 1,
+    cycle: normalizePositiveInteger(checkpoint.cycle) ?? 1,
+    stage: typeof checkpoint.stage === 'string' && checkpoint.stage.trim().length > 0
+      ? checkpoint.stage.trim()
+      : 'runtime.unknown',
+    summary: typeof checkpoint.summary === 'string' && checkpoint.summary.trim().length > 0
+      ? checkpoint.summary.trim()
+      : 'Mission checkpoint recorded.',
+    payload: isRecord(checkpoint.payload) ? cloneValue(checkpoint.payload) : {},
+    createdAt: normalizePositiveInteger(checkpoint.createdAt) ?? Date.now(),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -255,6 +332,14 @@ function normalizePositiveInteger(value: number | null | undefined): number | nu
   }
   const normalized = Math.trunc(value);
   return normalized > 0 ? normalized : null;
+}
+
+function normalizeGitSha(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().toLowerCase();
+  return /^[a-f0-9]{40,64}$/.test(trimmed) ? trimmed : null;
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {

@@ -12,6 +12,8 @@ import {
   type ChecklistSnapshot,
   type Mission,
   type MissionAttempt,
+  type MissionCheckpoint,
+  type MissionEnvironmentStamp,
   type MissionEvent,
   type MissionGeneration,
   type MissionExecutionInput,
@@ -119,6 +121,8 @@ type MissionRuntimeState = {
   checklistSnapshots: ChecklistSnapshot[];
   planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
+  environmentStamps: MissionEnvironmentStamp[];
+  checkpoints: MissionCheckpoint[];
   events: MissionEvent[];
 };
 
@@ -395,6 +399,62 @@ class AgentJobMissionRepository implements MissionRepository {
     return attempt;
   }
 
+  getEnvironmentStampById(id: string): MissionEnvironmentStamp | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const state = loadMissionRuntimeState(job);
+      const stamp = state.environmentStamps.find((entry) => entry.id === id);
+      if (stamp) {
+        return cloneValue(stamp);
+      }
+    }
+    return null;
+  }
+
+  listEnvironmentStamps(missionId: string): MissionEnvironmentStamp[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).environmentStamps : [];
+  }
+
+  saveEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+    const currentJob = this.agentJobs.requireById(stamp.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    const nextState: MissionRuntimeState = {
+      ...currentState,
+      environmentStamps: upsertById(currentState.environmentStamps, stamp)
+        .sort((left, right) => left.capturedAt - right.capturedAt),
+    };
+    this.persistState(currentJob, nextState);
+    return stamp;
+  }
+
+  getCheckpointById(id: string): MissionCheckpoint | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const state = loadMissionRuntimeState(job);
+      const checkpoint = state.checkpoints.find((entry) => entry.id === id);
+      if (checkpoint) {
+        return cloneValue(checkpoint);
+      }
+    }
+    return null;
+  }
+
+  listCheckpoints(missionId: string): MissionCheckpoint[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).checkpoints : [];
+  }
+
+  saveCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+    const currentJob = this.agentJobs.requireById(checkpoint.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    const nextState: MissionRuntimeState = {
+      ...currentState,
+      checkpoints: upsertById(currentState.checkpoints, checkpoint)
+        .sort((left, right) => left.createdAt - right.createdAt),
+    };
+    this.persistState(currentJob, nextState);
+    return checkpoint;
+  }
+
   listEvents(missionId: string): MissionEvent[] {
     const job = this.agentJobs.getById(missionId);
     return job ? loadMissionRuntimeState(job).events : [];
@@ -420,6 +480,8 @@ class AgentJobMissionRepository implements MissionRepository {
       checklistSnapshots: [],
       planChangeRequests: [],
       attempts: [],
+      environmentStamps: [],
+      checkpoints: [],
       events: [],
     });
     return mission;
@@ -909,6 +971,12 @@ function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
     attempts: Array.isArray(raw?.attempts)
       ? raw.attempts.map((attempt) => cloneValue(attempt as unknown as MissionAttempt))
       : [],
+    environmentStamps: Array.isArray(raw?.environmentStamps)
+      ? raw.environmentStamps.map((stamp) => cloneValue(stamp as unknown as MissionEnvironmentStamp))
+      : [],
+    checkpoints: Array.isArray(raw?.checkpoints)
+      ? raw.checkpoints.map((checkpoint) => cloneValue(checkpoint as unknown as MissionCheckpoint))
+      : [],
     events: Array.isArray(raw?.events)
       ? raw.events.map((event) => cloneValue(event as unknown as MissionEvent))
       : [],
@@ -923,6 +991,8 @@ function serializeMissionRuntimeState(state: MissionRuntimeState): AgentJobMissi
     checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot) as unknown as Record<string, unknown>),
     planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest) as unknown as Record<string, unknown>),
     attempts: state.attempts.map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
+    environmentStamps: state.environmentStamps.map((stamp) => cloneValue(stamp) as unknown as Record<string, unknown>),
+    checkpoints: state.checkpoints.map((checkpoint) => cloneValue(checkpoint) as unknown as Record<string, unknown>),
     events: state.events.map((event) => cloneValue(event) as unknown as Record<string, unknown>),
   };
 }

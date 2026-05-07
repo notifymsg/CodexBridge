@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9r-workflow-resolver-trace' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9s-environment-checkpoints' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',
@@ -19,6 +19,7 @@ export const MISSION_CONTROL_OWNS = [
   'progress-sink-contract',
   'supervision-foundation',
   'persisted-stop-intents',
+  'environment-stamp-checkpoint-persistence',
 ] as const;
 
 export const MISSION_CONTROL_DOES_NOT_OWN = [

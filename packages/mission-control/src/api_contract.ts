@@ -4,6 +4,8 @@ import type {
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
   MissionEvent,
   MissionGeneration,
   MissionLoopPolicy,
@@ -80,6 +82,10 @@ export interface MissionExecutionRefsView {
   workspacePath: string | null;
 }
 
+export interface MissionEnvironmentStampView extends MissionEnvironmentStamp {}
+
+export interface MissionCheckpointView extends MissionCheckpoint {}
+
 export interface MissionWorkflowStatusView {
   status: 'loaded' | 'invalid';
   source: MissionWorkflowSource;
@@ -148,6 +154,8 @@ export interface MissionDetailView extends MissionSummaryView {
   currentChecklistSnapshot: ChecklistSnapshot | null;
   planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
+  environmentStamps: MissionEnvironmentStampView[];
+  checkpoints: MissionCheckpointView[];
 }
 
 export type MissionTimelineEntry =
@@ -172,6 +180,16 @@ export type MissionTimelineEntry =
     attempt: MissionAttempt;
   }
   | {
+    type: 'environment_stamp';
+    createdAt: number;
+    environmentStamp: MissionEnvironmentStampView;
+  }
+  | {
+    type: 'checkpoint';
+    createdAt: number;
+    checkpoint: MissionCheckpointView;
+  }
+  | {
     type: 'event';
     createdAt: number;
     event: MissionEvent;
@@ -192,6 +210,8 @@ export interface MissionExecutionView {
   stopRequest: MissionStopRequest | null;
   pendingApproval: MissionPendingApproval | null;
   latestCycleResult: MissionCycleResult | null;
+  latestEnvironmentStamp: MissionEnvironmentStampView | null;
+  latestCheckpoint: MissionCheckpointView | null;
   loopSnapshot: MissionLoopSnapshotView;
   hostBindings: MissionHostBindingView;
   executionRefs: MissionExecutionRefsView;

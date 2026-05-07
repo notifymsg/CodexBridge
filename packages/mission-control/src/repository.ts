@@ -2,6 +2,8 @@ import type {
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
   MissionEvent,
   MissionGeneration,
   PlanChangeRequest,
@@ -33,6 +35,14 @@ export interface MissionRepository {
   getAttemptById(id: string): MissionAttempt | null;
   listAttempts(missionId: string): MissionAttempt[];
   saveAttempt(attempt: MissionAttempt): MissionAttempt;
+
+  getEnvironmentStampById(id: string): MissionEnvironmentStamp | null;
+  listEnvironmentStamps(missionId: string): MissionEnvironmentStamp[];
+  saveEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp;
+
+  getCheckpointById(id: string): MissionCheckpoint | null;
+  listCheckpoints(missionId: string): MissionCheckpoint[];
+  saveCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint;
 
   listEvents(missionId: string): MissionEvent[];
   appendEvent(event: MissionEvent): MissionEvent;

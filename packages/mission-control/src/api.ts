@@ -31,6 +31,8 @@ import type {
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
   MissionEvent,
   MissionPendingApproval,
   MissionStopRequest,
@@ -944,6 +946,8 @@ export class DirectMissionControlApi implements MissionControlApi {
       currentChecklistSnapshot: this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId),
       planChangeRequests: this.repository.listPlanChangeRequests(mission.id),
       attempts: sortAttempts(this.repository.listAttempts(mission.id)),
+      environmentStamps: listEnvironmentStamps(this.repository, mission.id),
+      checkpoints: listCheckpoints(this.repository, mission.id),
     };
   }
 
@@ -952,11 +956,15 @@ export class DirectMissionControlApi implements MissionControlApi {
     const workflow = this.resolveMissionWorkflow(mission);
     const checklistSnapshot = this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId);
     const attempts = sortAttempts(this.repository.listAttempts(mission.id));
+    const environmentStamps = listEnvironmentStamps(this.repository, mission.id);
+    const checkpoints = listCheckpoints(this.repository, mission.id);
     return {
       missionId: mission.id,
       stopRequest: cloneStopRequest(mission.stopRequest),
       pendingApproval: clonePendingApproval(mission.pendingApproval),
       latestCycleResult: getLatestMissionCycleResult(events),
+      latestEnvironmentStamp: environmentStamps.at(-1) ?? null,
+      latestCheckpoint: checkpoints.at(-1) ?? null,
       loopSnapshot: this.buildMissionLoopSnapshotView(mission, checklistSnapshot),
       hostBindings: buildMissionHostBindings(mission),
       executionRefs: this.buildMissionExecutionRefs(mission),
@@ -1096,6 +1104,16 @@ export class DirectMissionControlApi implements MissionControlApi {
         createdAt: attempt.createdAt,
         attempt,
       })),
+      ...listEnvironmentStamps(this.repository, missionId).map((environmentStamp) => ({
+        type: 'environment_stamp' as const,
+        createdAt: environmentStamp.capturedAt,
+        environmentStamp,
+      })),
+      ...listCheckpoints(this.repository, missionId).map((checkpoint) => ({
+        type: 'checkpoint' as const,
+        createdAt: checkpoint.createdAt,
+        checkpoint,
+      })),
       ...this.repository.listEvents(missionId).map((event) => ({
         type: 'event' as const,
         createdAt: event.createdAt,
@@ -1188,6 +1206,38 @@ function buildMissionArtifactRefs(resultArtifacts: unknown[]): MissionArtifactRe
     .filter((artifact) => artifact.path || artifact.name);
 }
 
+function listEnvironmentStamps(
+  repository: MissionRepository,
+  missionId: string,
+): MissionEnvironmentStamp[] {
+  return repository
+    .listEnvironmentStamps(missionId)
+    .slice()
+    .sort((left, right) => {
+      if (left.capturedAt !== right.capturedAt) {
+        return left.capturedAt - right.capturedAt;
+      }
+      return left.id.localeCompare(right.id);
+    })
+    .map((stamp) => cloneValue(stamp));
+}
+
+function listCheckpoints(
+  repository: MissionRepository,
+  missionId: string,
+): MissionCheckpoint[] {
+  return repository
+    .listCheckpoints(missionId)
+    .slice()
+    .sort((left, right) => {
+      if (left.createdAt !== right.createdAt) {
+        return left.createdAt - right.createdAt;
+      }
+      return left.id.localeCompare(right.id);
+    })
+    .map((checkpoint) => cloneValue(checkpoint));
+}
+
 function buildMissionChecklistStatusView(
   mission: Mission,
   checklistSnapshot: ChecklistSnapshot | null,
@@ -1260,6 +1310,10 @@ function cloneStopRequest(value: MissionStopRequest | null): MissionStopRequest 
   return {
     ...value,
   };
+}
+
+function cloneValue<T>(value: T): T {
+  return structuredClone(value);
 }
 
 function buildMissionSourceSummary(
@@ -1372,8 +1426,12 @@ function compareMissionTimelineEntry(left: MissionTimelineEntry, right: MissionT
         return 2;
       case 'attempt':
         return 3;
-      case 'event':
+      case 'environment_stamp':
         return 4;
+      case 'checkpoint':
+        return 5;
+      case 'event':
+        return 6;
     }
   };
   return rank(left) - rank(right);

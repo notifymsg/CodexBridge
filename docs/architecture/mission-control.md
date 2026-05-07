@@ -1196,6 +1196,12 @@ Suggested persisted metadata:
 
 ```ts
 type MissionEnvironmentStamp = {
+  id: string;
+  missionId: string;
+  generationId: string;
+  generationIndex: number;
+  attemptId: string | null;
+  cycle: number;
   cwd: string | null;
   workspacePath: string | null;
   gitSha: string | null;
@@ -1210,7 +1216,9 @@ type MissionCheckpoint = {
   missionId: string;
   attemptId: string | null;
   generationId: string;
+  generationIndex: number;
   cycle: number;
+  stage: string;
   summary: string;
   payload: Record<string, unknown>;
   createdAt: number;

@@ -17,7 +17,7 @@ import {
 import type { MissionAttempt, MissionEvent } from '../src/index.js';
 
 test('mission control package exposes the current Mission Control phase marker', () => {
-  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-9r-workflow-resolver-trace');
+  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-9s-environment-checkpoints');
 });
 
 test('mission state transitions are explicit and reject invalid transitions', () => {
@@ -242,4 +242,73 @@ test('json repository persists work items, generations, and checklist snapshots 
   assert.equal(restarted.listEvents(mission.id).length, 1);
   assert.equal(restarted.getMissionById(mission.id)?.activeGenerationIndex, 2);
   assert.equal(restarted.getMissionById(mission.id)?.attemptCount, 0);
+});
+
+test('json repository persists environment stamps and checkpoints as package-owned runtime artifacts', () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-phase9s-'));
+  const repo = new JsonFileMissionRepository(stateDir);
+  const queued = transitionMission(createMission({
+    id: 'mission-phase9s-1',
+    source: 'manual',
+    platform: 'weixin',
+    externalScopeId: 'wx-user-phase9s-1',
+    title: 'Persist execution context',
+    goal: 'Keep environment and checkpoint artifacts available for audit.',
+    expectedOutput: 'Persisted runtime audit records.',
+    acceptanceCriteria: ['Environment stamp is queryable', 'Checkpoint history is queryable'],
+    plan: ['Capture execution environment', 'Persist a runtime checkpoint'],
+    providerProfileId: 'openai-default',
+    cwd: '/repo',
+    workflowHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    now: 1_700_000_300_000,
+  }), 'queued', {
+    at: 1_700_000_300_005,
+  });
+  const mission = transitionMission(queued, 'running', {
+    at: 1_700_000_300_010,
+    activeAttemptId: 'attempt-phase9s-1',
+  });
+
+  repo.saveMission(mission);
+  repo.saveEnvironmentStamp({
+    id: `${mission.id}:env:attempt-phase9s-1`,
+    missionId: mission.id,
+    generationId: mission.activeGenerationId,
+    generationIndex: mission.activeGenerationIndex,
+    attemptId: 'attempt-phase9s-1',
+    cycle: 1,
+    cwd: '/repo',
+    workspacePath: '/tmp/workspace-phase9s-1',
+    gitSha: 'abcdef0123456789abcdef0123456789abcdef01abcdef0123456789abcdef01',
+    gitBranch: 'track/mission-control',
+    workflowHash: mission.workflowHash,
+    providerProfileId: mission.providerProfileId,
+    capturedAt: 1_700_000_300_020,
+  });
+  repo.saveCheckpoint({
+    id: `${mission.id}:checkpoint:1`,
+    missionId: mission.id,
+    attemptId: 'attempt-phase9s-1',
+    generationId: mission.activeGenerationId,
+    generationIndex: mission.activeGenerationIndex,
+    cycle: 1,
+    stage: 'attempt.started',
+    summary: 'Attempt #1 is ready to run.',
+    payload: {
+      workspacePath: '/tmp/workspace-phase9s-1',
+      workflowHash: mission.workflowHash,
+    },
+    createdAt: 1_700_000_300_030,
+  });
+
+  const reloaded = new JsonFileMissionRepository(stateDir);
+  assert.equal(reloaded.listEnvironmentStamps(mission.id).length, 1);
+  assert.equal(reloaded.listEnvironmentStamps(mission.id)[0]?.workspacePath, '/tmp/workspace-phase9s-1');
+  assert.equal(reloaded.listEnvironmentStamps(mission.id)[0]?.gitBranch, 'track/mission-control');
+  assert.equal(reloaded.listCheckpoints(mission.id).length, 1);
+  assert.equal(reloaded.listCheckpoints(mission.id)[0]?.stage, 'attempt.started');
+  assert.deepEqual(reloaded.listCheckpoints(mission.id)[0]?.payload, {
+    workspacePath: '/tmp/workspace-phase9s-1',
+    workflowHash: mission.workflowHash,
+  });
 });
