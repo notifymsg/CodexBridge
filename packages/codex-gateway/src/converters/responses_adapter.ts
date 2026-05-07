@@ -255,6 +255,35 @@ export function responsesRequestToCompactionResponse(
   });
 }
 
+export function inspectOpenAICompatiblePayloadCompatibility(
+  {
+    model,
+    protocol,
+    providerCapabilities,
+  }: {
+    model: string;
+    protocol?: string | null;
+    providerCapabilities: OpenAICompatibleProviderCapabilities | null | undefined;
+  },
+): {
+  upstreamModel: string;
+  filteredPaths: string[];
+  maxOutputTokens: number | null;
+} {
+  const normalizedModel = normalizeString(model);
+  const probe: JsonRecord = { model: normalizedModel };
+  const filteredPaths = applyOpenAICompatiblePayloadRules(probe, {
+    model: normalizedModel,
+    protocol,
+    providerCapabilities,
+  });
+  return {
+    upstreamModel: normalizeString(probe.model) || normalizedModel,
+    filteredPaths,
+    maxOutputTokens: resolveModelMaxOutputTokens(providerCapabilities, normalizedModel),
+  };
+}
+
 export function translateChatCompletionsSseToResponsesEvents(
   chunks: Iterable<string>,
   options: ResponsesSseTranslateOptions = {},
@@ -1225,41 +1254,68 @@ function applyOpenAICompatiblePayloadCompatibility(
     providerCapabilities: OpenAICompatibleProviderCapabilities | null | undefined;
   },
 ): JsonRecord {
-  const payload = providerCapabilities?.payload;
-  if (payload && typeof payload === 'object') {
-    for (const rule of payloadRuleList(payload, 'default')) {
-      if (payloadRuleMatchesModel(rule, model, protocol)) {
-        applyPayloadParams(chat, rule.params, false, rule.root);
-      }
-    }
-    for (const rule of payloadRuleList(payload, 'defaultRaw', 'default-raw')) {
-      if (payloadRuleMatchesModel(rule, model, protocol)) {
-        applyPayloadParams(chat, rule.params, false, rule.root, true);
-      }
-    }
-    for (const rule of payloadRuleList(payload, 'override')) {
-      if (payloadRuleMatchesModel(rule, model, protocol)) {
-        applyPayloadParams(chat, rule.params, true, rule.root);
-      }
-    }
-    for (const rule of payloadRuleList(payload, 'overrideRaw', 'override-raw')) {
-      if (payloadRuleMatchesModel(rule, model, protocol)) {
-        applyPayloadParams(chat, rule.params, true, rule.root, true);
-      }
-    }
-    for (const rule of payloadRuleList(payload, 'filter')) {
-      if (payloadRuleMatchesModel(rule, model, protocol)) {
-        for (const path of payloadFilterPaths(rule)) {
-          deleteNestedPath(chat, path);
-        }
-      }
-    }
-  }
+  applyOpenAICompatiblePayloadRules(chat, {
+    model,
+    protocol,
+    providerCapabilities,
+  });
   const maxOutputTokens = resolveModelMaxOutputTokens(providerCapabilities, model);
   if (maxOutputTokens !== null && Number(chat.max_tokens) > maxOutputTokens) {
     chat.max_tokens = maxOutputTokens;
   }
   return omitUndefined(chat);
+}
+
+function applyOpenAICompatiblePayloadRules(
+  target: JsonRecord,
+  {
+    model,
+    protocol,
+    providerCapabilities,
+  }: {
+    model: string;
+    protocol?: string | null;
+    providerCapabilities: OpenAICompatibleProviderCapabilities | null | undefined;
+  },
+): string[] {
+  const payload = providerCapabilities?.payload;
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+
+  for (const rule of payloadRuleList(payload, 'default')) {
+    if (payloadRuleMatchesModel(rule, model, protocol)) {
+      applyPayloadParams(target, rule.params, false, rule.root);
+    }
+  }
+  for (const rule of payloadRuleList(payload, 'defaultRaw', 'default-raw')) {
+    if (payloadRuleMatchesModel(rule, model, protocol)) {
+      applyPayloadParams(target, rule.params, false, rule.root, true);
+    }
+  }
+  for (const rule of payloadRuleList(payload, 'override')) {
+    if (payloadRuleMatchesModel(rule, model, protocol)) {
+      applyPayloadParams(target, rule.params, true, rule.root);
+    }
+  }
+  for (const rule of payloadRuleList(payload, 'overrideRaw', 'override-raw')) {
+    if (payloadRuleMatchesModel(rule, model, protocol)) {
+      applyPayloadParams(target, rule.params, true, rule.root, true);
+    }
+  }
+
+  const filteredPaths: string[] = [];
+  for (const rule of payloadRuleList(payload, 'filter')) {
+    if (!payloadRuleMatchesModel(rule, model, protocol)) {
+      continue;
+    }
+    for (const path of payloadFilterPaths(rule)) {
+      filteredPaths.push(path);
+      deleteNestedPath(target, path);
+    }
+  }
+
+  return [...new Set(filteredPaths)];
 }
 
 function payloadRuleList(

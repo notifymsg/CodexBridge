@@ -97,9 +97,10 @@ This package owns only protocol behavior:
 
 The package `/models` and `/v1/models` output now preserves raw catalog
 metadata such as `contextWindow`, `pricing`, and model `capabilities`, and
-also exposes a normalized `protocol` block for effective adapter behavior such
-as tools, web search, multimodal input, reasoning support, compact support,
-structured output, and output-token limits.
+also exposes a normalized top-level `meta` block plus a per-model `protocol`
+block for effective adapter behavior such as tools, web search, multimodal
+input, reasoning support, reasoning transport mode, upstream model alias
+routing, compact support, structured output, and output-token limits.
 
 The adapter server also supports an optional package-local trace sink so
 request translation, response translation, retry behavior, and translated

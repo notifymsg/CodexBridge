@@ -2,6 +2,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import net from 'node:net';
 import {
   chatCompletionsResponseToResponses,
+  inspectOpenAICompatiblePayloadCompatibility,
   responsesRequestToCompactionResponse,
   responsesRequestToChatCompletions,
   translateChatCompletionsSseStreamToResponsesSse,
@@ -10,6 +11,7 @@ import {
   buildOpenAICompatibleCapabilityCatalogMetadata,
 } from '../capabilities/capability_presets.js';
 import {
+  getOpenAICompatibleThinkingPolicy,
   getProviderThinkingSupport,
   resolveOpenAICompatibleProviderCapabilitiesForModel,
   type OpenAICompatibleModelCapabilities,
@@ -280,6 +282,14 @@ export class OpenAICompatibleResponsesAdapterServer {
         object: 'list',
         data: this.models,
         models: this.models,
+        meta: buildModelsResponseMetadata({
+          defaultModel: this.defaultModel,
+          ownedBy: this.ownedBy,
+          providerKind: this.providerKind,
+          providerName: this.providerName,
+          providerCapabilities: this.providerCapabilities,
+          upstreamChatCompletionsPath: this.upstreamChatCompletionsPath,
+        }),
       });
       return;
     }
@@ -813,7 +823,13 @@ function buildProtocolMetadataForModel({
     modelId,
   );
   const reasoning = getProviderThinkingSupport(providerKind, effectiveCapabilities);
+  const thinkingPolicy = getOpenAICompatibleThinkingPolicy(providerKind, effectiveCapabilities);
   const multimodal = effectiveCapabilities?.multimodal ?? null;
+  const payloadCompatibility = inspectOpenAICompatiblePayloadCompatibility({
+    model: modelId,
+    protocol: providerKind,
+    providerCapabilities: effectiveCapabilities,
+  });
 
   return {
     tools: {
@@ -839,6 +855,11 @@ function buildProtocolMetadataForModel({
       supported: reasoning.supportedReasoningEfforts.length > 0,
       supportedReasoningEfforts: reasoning.supportedReasoningEfforts,
       defaultReasoningEffort: reasoning.defaultReasoningEffort,
+      transport: {
+        mode: thinkingPolicy.mode,
+        booleanField: normalizeString(thinkingPolicy.booleanField) || null,
+        strippedFields: [...thinkingPolicy.stripFields],
+      },
     },
     structuredOutput: {
       jsonSchema: typeof modelCapabilities?.jsonSchema === 'boolean'
@@ -848,8 +869,57 @@ function buildProtocolMetadataForModel({
     responses: {
       supportsCompact: effectiveCapabilities?.supportsResponsesCompact === true,
     },
+    routing: {
+      upstreamModel: payloadCompatibility.upstreamModel,
+      requiresModelAlias: payloadCompatibility.upstreamModel !== modelId,
+    },
     limits: {
       maxOutputTokens: normalizePositiveNumber(modelCapabilities?.maxOutputTokens),
+    },
+  };
+}
+
+function buildModelsResponseMetadata({
+  defaultModel,
+  ownedBy,
+  providerKind,
+  providerName,
+  providerCapabilities,
+  upstreamChatCompletionsPath,
+}: {
+  defaultModel: string;
+  ownedBy: string;
+  providerKind: string;
+  providerName: string;
+  providerCapabilities: OpenAICompatibleProviderCapabilities | null;
+  upstreamChatCompletionsPath: string;
+}): JsonRecord {
+  return {
+    provider: {
+      kind: providerKind,
+      name: providerName,
+      ownedBy,
+    },
+    defaults: {
+      model: defaultModel,
+    },
+    routes: {
+      primary: {
+        models: '/models',
+        responses: '/responses',
+        responsesCompact: '/responses/compact',
+      },
+      compatibility: {
+        models: '/v1/models',
+        responses: '/v1/responses',
+        responsesCompact: '/v1/responses/compact',
+      },
+      upstream: {
+        chatCompletions: upstreamChatCompletionsPath,
+        responsesCompact: providerCapabilities?.supportsResponsesCompact === true
+          ? normalizePath(providerCapabilities.upstreamResponsesCompactPath) || '/responses/compact'
+          : null,
+      },
     },
   };
 }

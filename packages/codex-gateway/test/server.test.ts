@@ -284,6 +284,10 @@ test('adapter server trace sink captures downgrade and filter adjustments', asyn
 test('adapter server exposes model metadata from package boundary', async () => {
   const server = new OpenAICompatibleResponsesAdapterServer({
     apiKey: 'test-key',
+    defaultModel: 'example-model',
+    providerKind: 'iflow',
+    providerName: 'iFlow',
+    ownedBy: 'iflow',
     models: [{
       id: 'example-model',
       contextWindow: 128000,
@@ -297,6 +301,19 @@ test('adapter server exposes model metadata from package boundary', async () => 
         reasoning: {
           supportedReasoningEfforts: ['low', 'high'],
           defaultReasoningEffort: 'high',
+        },
+        thinking: {
+          mode: 'boolean',
+          booleanField: 'chat_template_kwargs.enable_thinking',
+          stripFields: ['reasoning_effort', 'thinking'],
+          booleanFalseEfforts: ['none'],
+        },
+        payload: {
+          override: [{
+            params: {
+              model: 'provider/example-model',
+            },
+          }],
         },
         parallelToolCalls: false,
         maxOutputTokens: 4096,
@@ -318,6 +335,32 @@ test('adapter server exposes model metadata from package boundary', async () => 
     const response = await fetch(`${server.baseUrl}/v1/models`);
     const body = await response.json() as any;
     assert.equal(response.status, 200);
+    assert.deepEqual(body.meta, {
+      provider: {
+        kind: 'iflow',
+        name: 'iFlow',
+        ownedBy: 'iflow',
+      },
+      defaults: {
+        model: 'example-model',
+      },
+      routes: {
+        primary: {
+          models: '/models',
+          responses: '/responses',
+          responsesCompact: '/responses/compact',
+        },
+        compatibility: {
+          models: '/v1/models',
+          responses: '/v1/responses',
+          responsesCompact: '/v1/responses/compact',
+        },
+        upstream: {
+          chatCompletions: '/chat/completions',
+          responsesCompact: null,
+        },
+      },
+    });
     assert.equal(body.data[0].id, 'example-model');
     assert.equal(body.data[0].contextWindow, 128000);
     assert.deepEqual(body.data[0].pricing, {
@@ -330,6 +373,19 @@ test('adapter server exposes model metadata from package boundary', async () => 
       reasoning: {
         supportedReasoningEfforts: ['low', 'high'],
         defaultReasoningEffort: 'high',
+      },
+      thinking: {
+        mode: 'boolean',
+        booleanField: 'chat_template_kwargs.enable_thinking',
+        stripFields: ['reasoning_effort', 'thinking'],
+        booleanFalseEfforts: ['none'],
+      },
+      payload: {
+        override: [{
+          params: {
+            model: 'provider/example-model',
+          },
+        }],
       },
       parallelToolCalls: false,
       maxOutputTokens: 4096,
@@ -361,6 +417,8 @@ test('adapter server exposes model metadata from package boundary', async () => 
       },
       quirks: [
         'parallel_tool_calls_filtered',
+        'upstream_model_alias_required',
+        'provider_specific_thinking_toggle',
         'text_placeholder_for_unsupported_input_parts',
       ],
     });
@@ -385,12 +443,21 @@ test('adapter server exposes model metadata from package boundary', async () => 
         supported: true,
         supportedReasoningEfforts: ['low', 'high'],
         defaultReasoningEffort: 'high',
+        transport: {
+          mode: 'boolean',
+          booleanField: 'chat_template_kwargs.enable_thinking',
+          strippedFields: ['reasoning_effort', 'thinking'],
+        },
       },
       structuredOutput: {
         jsonSchema: true,
       },
       responses: {
         supportsCompact: false,
+      },
+      routing: {
+        upstreamModel: 'provider/example-model',
+        requiresModelAlias: true,
       },
       limits: {
         maxOutputTokens: 4096,
