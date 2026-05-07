@@ -453,6 +453,10 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(listResult.data[0]?.executionRefs.providerRunId, 'run-api-1');
   assert.equal(listResult.data[0]?.artifactRefs[0]?.path, '/tmp/report.md');
   assert.equal(listResult.data[0]?.latestCycleResult?.status, 'retry');
+  assert.equal(listResult.data[0]?.workflow.status, 'loaded');
+  assert.equal(listResult.data[0]?.checklistStatus.generationIndex, 1);
+  assert.equal(listResult.data[0]?.checklistStatus.currentItem?.title, 'Patch exists');
+  assert.equal(listResult.data[0]?.workpadStatus.summary, 'Release blocker investigation is in progress.');
 
   const detailResult = await api.queries.getMissionDetail({
     meta: {
@@ -470,6 +474,15 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(detailResult.data?.planChangeRequests.length, 1);
   assert.equal(detailResult.data?.attempts.length, 1);
   assert.equal(detailResult.data?.latestCycleResult?.stage, 'verifier.repair');
+  assert.equal(detailResult.data?.workflow.status, 'loaded');
+  assert.equal(detailResult.data?.workflow.error, null);
+  assert.equal(detailResult.data?.checklistStatus.totalItems, 6);
+  assert.equal(detailResult.data?.checklistStatus.completedItems, 0);
+  assert.equal(detailResult.data?.checklistStatus.overallCompletion, 0);
+  assert.equal(detailResult.data?.checklistStatus.currentItem?.title, 'Patch exists');
+  assert.equal(detailResult.data?.workpadStatus.summary, 'Release blocker investigation is in progress.');
+  assert.equal(detailResult.data?.workpadStatus.latestBlocker, 'Waiting for the verification pass.');
+  assert.match(detailResult.data?.workpadStatus.attemptHistory[0] ?? '', /#1 verifying/);
 
   const timelineResult = await api.queries.getMissionTimeline({
     meta: {
@@ -513,6 +526,68 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(executionResult.data?.executionRefs.workflowPath, '/repo/.codexbridge/mission/WORKFLOW.md');
   assert.equal(executionResult.data?.artifactRefs[0]?.name, 'report.md');
   assert.equal(executionResult.data?.latestCycleResult?.audit.eventSeq, 1);
+  assert.equal(executionResult.data?.workflow.status, 'loaded');
+  assert.equal(executionResult.data?.checklistStatus.currentItem?.title, 'Patch exists');
+  assert.equal(executionResult.data?.workpadStatus.latestVerifierSummary, 'Verification has not finished yet.');
+});
+
+test('direct mission control api surfaces invalid workflow state through package-owned read models', async () => {
+  const { repo, api, nowRef } = createApiHarness(1_701_200_090_000);
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-api-workflow-invalid-'));
+  const workflowPath = path.join(workspacePath, '.codexbridge', 'mission', 'WORKFLOW.md');
+  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+  fs.writeFileSync(workflowPath, `---
+version: 2
+maxTurns: many
+---
+Broken workflow.
+`);
+  const queued = transitionMission(createMission({
+    id: 'mission-api-invalid-workflow-1',
+    source: 'manual',
+    sourceRef: 'manual:invalid-workflow-1',
+    platform: 'weixin',
+    externalScopeId: 'wx-user-invalid-workflow-1',
+    title: 'Investigate invalid workflow handling',
+    goal: 'Expose workflow load failures through the package query contract.',
+    expectedOutput: 'A workflow status summary.',
+    acceptanceCriteria: ['Workflow error is visible'],
+    plan: ['Load the workflow', 'Report the failure'],
+    providerProfileId: 'codex-default',
+    cwd: workspacePath,
+    workflowPath,
+    now: nowRef.value,
+  }), 'queued', {
+    at: nowRef.value + 10,
+    reason: 'Mission queued for workflow status inspection.',
+  });
+
+  repo.saveMission(queued);
+  repo.saveWorkItem(createMissionWorkItem(queued, { at: nowRef.value + 5 }));
+  repo.saveGeneration(createMissionGeneration(queued, {
+    at: nowRef.value + 5,
+    trigger: 'initial',
+  }));
+  repo.saveChecklistSnapshot(createMissionChecklistSnapshot(queued, {
+    at: nowRef.value + 6,
+    generationId: queued.activeGenerationId,
+  }));
+
+  const detailResult = await api.queries.getMissionDetail({
+    meta: {
+      requestId: 'req-detail-invalid-workflow-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: queued.id,
+    },
+  });
+
+  assert.equal(detailResult.data?.workflow.status, 'invalid');
+  assert.equal(detailResult.data?.workflow.source.kind, 'file');
+  assert.equal(detailResult.data?.workflow.source.path, workflowPath);
+  assert.match(detailResult.data?.workflow.error ?? '', /version|maxTurns/);
 });
 
 test('direct mission control api commands persist retry, resume, and stop transitions', async () => {

@@ -156,6 +156,10 @@ test('AgentJobService createJob seeds a manual source-backed mission while keepi
   assert.equal(detail?.hostBindings.source, 'manual');
   assert.equal(detail?.hostBindings.bridgeSessionId, bridgeSession.id);
   assert.equal(detail?.hostBindings.codexThreadId, bridgeSession.codexThreadId);
+  assert.equal(detail?.workflow.status, 'loaded');
+  assert.equal(detail?.checklistStatus.currentItem?.title, created.expectedOutput);
+  assert.equal(detail?.checklistStatus.totalItems, 5);
+  assert.equal(detail?.workpadStatus.status, 'queued');
   assert.equal(detail?.currentChecklistSnapshot?.sourceRef, created.id);
   assert.deepEqual(detail?.currentChecklistSnapshot?.acceptanceCriteria, [created.expectedOutput]);
   assert.deepEqual(detail?.currentChecklistSnapshot?.plan, created.plan);

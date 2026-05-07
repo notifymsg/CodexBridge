@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9g-host-supervision-dispatch' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9h-authoritative-read-models' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',

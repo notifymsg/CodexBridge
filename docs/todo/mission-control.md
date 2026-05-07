@@ -597,18 +597,25 @@ the first attempt starts. CodexBridge queued `/agent rename` now uses that
 path when possible instead of rewriting authoritative mission/work-item state
 directly through bridge-local repository access.
 
-Phase 9f is the current validated baseline, but several behaviors above are
+Phase 9h landed: Mission Control query read models now surface authoritative
+workflow load state, checklist progression, and workpad/attempt status views.
+CodexBridge `/agent show` now prefers those package-owned views instead of
+loading `WORKFLOW.md` or reconstructing attempt/workpad state in the bridge,
+and `/agent result` now prefers authoritative mission `resultText` before
+falling back to thread/session recovery.
+
+Phase 9h is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
   shrinking toward a pure projection/cache
-- `/agent` reads still need to move further toward package-owned
-  command/query/timeline contracts
+- artifact/result export delivery still keeps bridge-side compatibility
+  fallbacks for older jobs and missing package-backed files
 - source-backed mission sync now reaches the initial manual create path, a
   pristine pre-attempt refresh path, and a first assistant-record-backed
-  `local-todo` adapter, but broader source sync/reconciliation and final
-  `loop.sh` fallback reduction still belong to the unfinished `Phase 9`
-  backlog
+  `local-todo` adapter, but broader source sync/reconciliation and proof that
+  a later non-CodexBridge host can consume the same package contract still
+  belong to the unfinished backlog
 
 ## Phase 7: Checklist-First Domain Hardening
 
@@ -740,12 +747,21 @@ truth, stale `verifying` / `repairing` missions remain discoverable for resume,
 and local host scheduling keeps `loop.sh` as an operational fallback instead
 of a structural source of run ownership.
 
+Phase 9h landed: package-owned mission read models now expose authoritative
+workflow/checklist/workpad status views so hosts can render `/agent` state
+without loading `WORKFLOW.md` or reconstructing attempt/checklist progress
+from bridge-local compatibility fields. CodexBridge `/agent show` now consumes
+those package views directly, and `/agent result` prefers authoritative mission
+`resultText` before bridge/session fallbacks.
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
 - [x] Support local todo/checklist source adapters
 - [x] Support package-owned pristine source sync/reconciliation before the
   first attempt starts
+- [x] Add package-owned workflow/checklist/workpad read models so hosts can
+  render authoritative mission state without bridge-local reconstruction
 - [ ] Support future issue/board integrations
 - [x] Keep external checklist/source truth separate from internal immutable
   `ChecklistSnapshot` runtime copies
@@ -810,7 +826,7 @@ Mission Control is ready for broader extraction when:
 - [x] Restart recovery works for queued/running/verifying missions
 - [x] `/agent` uses the mission runtime without host-owned runner logic
 - [x] The package has no imports from platform/runtime/i18n command code
-- [ ] `WorkItem`/checklist/generation semantics are authoritative runtime
+- [x] `WorkItem`/checklist/generation semantics are authoritative runtime
   models instead of host-local conventions
 - [x] `AgentJob` is only a rebuildable host projection/cache, not mission truth
 - [x] package-owned commands/queries/streams are enough for a host to observe

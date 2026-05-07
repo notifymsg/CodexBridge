@@ -13,7 +13,6 @@ import {
 } from './assistant_record_service.js';
 import {
   createMissionControlledAgentJobView,
-  loadMissionWorkflowForAgentJob,
 } from './mission_control_agent_job_adapter.js';
 import { runAgentJobWithMissionControl } from './mission_control_agent_job_runner.js';
 import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
@@ -31,7 +30,6 @@ import {
   type SupportedLocale,
   type Translator,
 } from '../i18n/index.js';
-import { createMissionWorkpadStatusView } from '../../packages/mission-control/src/index.js';
 import {
   CodexInstructionsManager,
   type CodexInstructionsSnapshot,
@@ -6068,20 +6066,17 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const job = createMissionControlledAgentJobView(resolved.job);
     const detail = this.agentJobs.getMissionDetail(resolved.job.id);
     if (!detail) {
       return messageResponse([
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const workflowLoadResult = loadMissionWorkflowForAgentJob(job);
-    const workflow = workflowLoadResult.workflow;
-    const missionStatusView = createMissionWorkpadStatusView({
-      mission: detail.mission,
-      attempts: detail.attempts,
-      workflow,
-    });
+    const job = resolved.job;
+    const missionStatusView = detail.workpadStatus;
+    const workflowValue = detail.workflow.status === 'invalid'
+      ? (detail.workflow.error ?? detail.workflow.source.label)
+      : detail.workflow.source.label;
     const lines = [
       this.t('coordinator.agent.detailTitle', { title: detail.mission.title }),
       this.t('coordinator.agent.status', {
@@ -6097,9 +6092,7 @@ export class BridgeCoordinator {
       this.t('coordinator.agent.providerProfile', { value: detail.mission.providerProfileId }),
       this.t('coordinator.agent.workingDirectory', { value: detail.mission.cwd ?? this.t('common.notSet') }),
       this.t('coordinator.agent.workflow', {
-        value: workflow
-          ? workflow.source.label
-          : workflowLoadResult.error?.message ?? detail.mission.workflowPath ?? this.t('common.notSet'),
+        value: workflowValue || this.t('common.notSet'),
       }),
       this.t('coordinator.agent.goal', { value: detail.mission.goal }),
       this.t('coordinator.agent.expectedOutput', { value: detail.mission.expectedOutput }),
@@ -6107,6 +6100,17 @@ export class BridgeCoordinator {
       ...detail.mission.plan.map((line, index) => `${index + 1}. ${line}`),
       this.t('coordinator.agent.attempts', { value: `${detail.mission.attemptCount}/${detail.mission.maxAttempts}` }),
     ];
+    if (detail.checklistStatus.totalItems > 0) {
+      lines.push(this.t('coordinator.agent.checklistProgress', {
+        completed: detail.checklistStatus.completedItems,
+        total: detail.checklistStatus.totalItems,
+      }));
+    }
+    if (detail.checklistStatus.currentItem?.title) {
+      lines.push(this.t('coordinator.agent.currentChecklistItem', {
+        value: detail.checklistStatus.currentItem.title,
+      }));
+    }
     if (missionStatusView.summary) {
       lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
     }
@@ -6890,13 +6894,21 @@ export class BridgeCoordinator {
 
   async resolveAgentJobResultText(job: AgentJob): Promise<string> {
     const effectiveJob = createMissionControlledAgentJobView(job);
-    const stored = stripAgentArtifactProtocol(effectiveJob.resultText ?? '').trim();
-    if (stored && !isAgentResultPreviewOnly(effectiveJob, stored)) {
+    const detail = this.agentJobs?.getMissionDetail(effectiveJob.id);
+    const authoritativeJob = detail
+      ? {
+        ...effectiveJob,
+        lastResultPreview: detail.mission.lastResultPreview ?? effectiveJob.lastResultPreview,
+        resultText: detail.mission.resultText ?? effectiveJob.resultText,
+      }
+      : effectiveJob;
+    const stored = stripAgentArtifactProtocol(authoritativeJob.resultText ?? '').trim();
+    if (stored && !isAgentResultPreviewOnly(authoritativeJob, stored)) {
       return stored;
     }
     const session = this.agentJobs?.getSession?.(effectiveJob) ?? this.bridgeSessions.getSessionById(effectiveJob.bridgeSessionId);
     if (!session) {
-      return stored || String(effectiveJob.lastResultPreview ?? '').trim();
+      return stored || String(authoritativeJob.lastResultPreview ?? '').trim();
     }
     try {
       const thread = await this.bridgeSessions.readProviderThread(
@@ -6905,17 +6917,17 @@ export class BridgeCoordinator {
         { includeTurns: true },
       );
       const recovered = stripAgentArtifactProtocol(extractLastAssistantThreadText(thread));
-      if (recovered && !isAgentResultPreviewOnly(effectiveJob, recovered)) {
+      if (recovered && !isAgentResultPreviewOnly(authoritativeJob, recovered)) {
         return recovered;
       }
     } catch {
       // Keep the command usable even if the provider thread cannot be reopened.
     }
     const rolloutRecovered = stripAgentArtifactProtocol(readCodexRolloutLastAgentMessage(session.codexThreadId));
-    if (rolloutRecovered && !isAgentResultPreviewOnly(effectiveJob, rolloutRecovered)) {
+    if (rolloutRecovered && !isAgentResultPreviewOnly(authoritativeJob, rolloutRecovered)) {
       return rolloutRecovered;
     }
-    return stored || String(effectiveJob.lastResultPreview ?? '').trim();
+    return stored || String(authoritativeJob.lastResultPreview ?? '').trim();
   }
 
   createAgentResultTextArtifact(job: AgentJob, resultText: string): TurnArtifactDeliveredItem {

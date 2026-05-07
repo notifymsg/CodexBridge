@@ -1663,6 +1663,17 @@ interface MissionQueries {
 }
 ```
 
+Query read-model guidance:
+
+- summary/detail query views should already carry resolved workflow load state
+  so hosts do not load `WORKFLOW.md` directly just to explain mission policy
+- query views should expose authoritative checklist progress/current-item data
+  derived from `ChecklistSnapshot` + `MissionGeneration`, rather than forcing
+  hosts to infer progress from prompt text or host-local caches
+- rendered workpad/attempt status views should come from package-owned mission
+  state so chat/web/CLI surfaces can present the same runtime truth without
+  reconstructing it in each host
+
 Suggested stream surface:
 
 ```ts

@@ -136,6 +136,17 @@ Main remaining integration gap:
     ownership
   - `AgentJob` remains a compatibility projection/cache, but it no longer
     decides which missions are eligible for continuation after recovery
+- Phase 9h now adds package-owned authoritative read models on top of that
+  runtime:
+  - Mission Control query views now surface resolved workflow load state,
+    checklist progress/current item, and rendered workpad/attempt status
+    directly from package-owned mission state
+  - CodexBridge `/agent show` now consumes those package views instead of
+    loading `WORKFLOW.md` and reconstructing attempt/workpad status in bridge
+    helpers
+  - `/agent result` now prefers authoritative mission `resultText` before
+    falling back to session/thread recovery paths, so bridge read behavior
+    keeps moving toward package-owned runtime truth
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -149,8 +160,9 @@ Main remaining integration gap:
   lifecycle truth directly
 - the next hardening work is finishing source sync/reconciliation beyond the
   current manual create path, pristine pre-attempt sync path, and first local
-  todo adapter; and continuing to thin the remaining bridge projection seams
-  so future Telegram, CLI, or web hosts do not re-implement bridge-local
+  todo adapter; continuing to shrink `AgentJob` compatibility caches; and
+  proving that a later Telegram, CLI, or web host can consume those same
+  package-owned read/control contracts without re-implementing bridge-local
   runtime logic
 
 ## V0 Migration Baseline Sources

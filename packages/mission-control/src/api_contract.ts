@@ -1,4 +1,5 @@
 import type {
+  ChecklistItem,
   ChecklistSnapshot,
   Mission,
   MissionAttempt,
@@ -16,6 +17,8 @@ import type {
 } from './types.js';
 import type { MissionCycleResult } from './cycle_result.js';
 import type { WorkItemSourceSummary } from './source.js';
+import type { MissionWorkpadStatusView } from './workpad_view.js';
+import type { MissionWorkflowSource } from './workflow.js';
 
 export interface MissionControlBoundaryMetadata {
   requestId: string;
@@ -72,6 +75,25 @@ export interface MissionExecutionRefsView {
   workspacePath: string | null;
 }
 
+export interface MissionWorkflowStatusView {
+  status: 'loaded' | 'invalid';
+  source: MissionWorkflowSource;
+  error: string | null;
+}
+
+export interface MissionChecklistStatusView {
+  generationId: string;
+  generationIndex: number;
+  checklistSnapshotId: string | null;
+  checklistSnapshotVersion: number | null;
+  sourceRevision: string | null;
+  totalItems: number;
+  completedItems: number;
+  blockedItems: number;
+  overallCompletion: number | null;
+  currentItem: ChecklistItem | null;
+}
+
 export interface MissionSummaryView {
   workItem: WorkItem | null;
   mission: Mission;
@@ -85,6 +107,9 @@ export interface MissionSummaryView {
   pendingApproval: MissionPendingApproval | null;
   hostBindings: MissionHostBindingView;
   executionRefs: MissionExecutionRefsView;
+  workflow: MissionWorkflowStatusView;
+  checklistStatus: MissionChecklistStatusView;
+  workpadStatus: MissionWorkpadStatusView;
   artifactRefs: MissionArtifactRefView[];
 }
 
@@ -139,6 +164,9 @@ export interface MissionExecutionView {
   latestCycleResult: MissionCycleResult | null;
   hostBindings: MissionHostBindingView;
   executionRefs: MissionExecutionRefsView;
+  workflow: MissionWorkflowStatusView;
+  checklistStatus: MissionChecklistStatusView;
+  workpadStatus: MissionWorkpadStatusView;
   artifactRefs: MissionArtifactRefView[];
 }
 

@@ -9,9 +9,18 @@ import {
   materializeMissionStop,
   shouldMissionStopImmediately,
 } from './control_actions.js';
-import { getLatestMissionCycleResult } from './cycle_result.js';
+import {
+  getActiveChecklistItem,
+  getLatestMissionCycleResult,
+  summarizeChecklistSnapshotProgress,
+} from './cycle_result.js';
 import { createMissionAggregateFromSourceSummary } from './source_mission.js';
 import { createWorkItemSourceSummary } from './source.js';
+import { createMissionWorkpadStatusView } from './workpad_view.js';
+import {
+  MissionWorkflowLoader,
+  type LoadedMissionWorkflow,
+} from './workflow.js';
 import type { MissionRepository } from './repository.js';
 import type {
   ChecklistSnapshot,
@@ -58,6 +67,7 @@ export interface DirectMissionControlApiOptions {
   repository: MissionRepository;
   now?: () => number;
   generateId?: () => string;
+  workflowLoader?: MissionWorkflowLoader;
 }
 
 export class DirectMissionControlApi implements MissionControlApi {
@@ -66,6 +76,8 @@ export class DirectMissionControlApi implements MissionControlApi {
   private readonly now: () => number;
 
   private readonly generateId: () => string;
+
+  private readonly workflowLoader: MissionWorkflowLoader;
 
   readonly commands: MissionControlCommands;
 
@@ -77,10 +89,12 @@ export class DirectMissionControlApi implements MissionControlApi {
     repository,
     now = () => Date.now(),
     generateId = () => `mission-control-${Math.random().toString(16).slice(2)}`,
+    workflowLoader = new MissionWorkflowLoader(),
   }: DirectMissionControlApiOptions) {
     this.repository = repository;
     this.now = now;
     this.generateId = generateId;
+    this.workflowLoader = workflowLoader;
     this.commands = {
       createMission: (request) => this.handleCreateMission(request),
       syncMissionSource: (request) => this.handleSyncMissionSource(request),
@@ -481,6 +495,9 @@ export class DirectMissionControlApi implements MissionControlApi {
   private buildMissionSummaryView(mission: Mission): MissionSummaryView {
     const workItem = this.repository.getWorkItemById(mission.workItemId);
     const events = this.repository.listEvents(mission.id);
+    const attempts = sortAttempts(this.repository.listAttempts(mission.id));
+    const workflow = this.resolveMissionWorkflow(mission);
+    const checklistSnapshot = this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId);
     return {
       workItem,
       mission,
@@ -494,6 +511,13 @@ export class DirectMissionControlApi implements MissionControlApi {
       pendingApproval: clonePendingApproval(mission.pendingApproval),
       hostBindings: buildMissionHostBindings(mission),
       executionRefs: this.buildMissionExecutionRefs(mission),
+      workflow: workflow.view,
+      checklistStatus: buildMissionChecklistStatusView(mission, checklistSnapshot),
+      workpadStatus: createMissionWorkpadStatusView({
+        mission,
+        attempts,
+        workflow: workflow.loadedWorkflow,
+      }),
       artifactRefs: buildMissionArtifactRefs(mission.resultArtifacts),
     };
   }
@@ -511,6 +535,9 @@ export class DirectMissionControlApi implements MissionControlApi {
 
   private buildMissionExecutionView(mission: Mission): MissionExecutionView {
     const events = this.repository.listEvents(mission.id);
+    const workflow = this.resolveMissionWorkflow(mission);
+    const checklistSnapshot = this.repository.getChecklistSnapshotById(mission.currentChecklistSnapshotId);
+    const attempts = sortAttempts(this.repository.listAttempts(mission.id));
     return {
       missionId: mission.id,
       stopRequest: cloneStopRequest(mission.stopRequest),
@@ -518,7 +545,51 @@ export class DirectMissionControlApi implements MissionControlApi {
       latestCycleResult: getLatestMissionCycleResult(events),
       hostBindings: buildMissionHostBindings(mission),
       executionRefs: this.buildMissionExecutionRefs(mission),
+      workflow: workflow.view,
+      checklistStatus: buildMissionChecklistStatusView(mission, checklistSnapshot),
+      workpadStatus: createMissionWorkpadStatusView({
+        mission,
+        attempts,
+        workflow: workflow.loadedWorkflow,
+      }),
       artifactRefs: buildMissionArtifactRefs(mission.resultArtifacts),
+    };
+  }
+
+  private resolveMissionWorkflow(mission: Mission): {
+    loadedWorkflow: LoadedMissionWorkflow | null;
+    view: MissionSummaryView['workflow'];
+  } {
+    const result = this.workflowLoader.tryLoad({
+      cwd: mission.cwd,
+      workspacePath: mission.workspacePath,
+      explicitPath: mission.workflowPath ?? undefined,
+    });
+    if (result.workflow) {
+      return {
+        loadedWorkflow: result.workflow,
+        view: {
+          status: 'loaded',
+          source: result.workflow.source,
+          error: null,
+        },
+      };
+    }
+    const workflowPath = result.error.workflowPath ?? mission.workflowPath ?? null;
+    const error = result.error.issues.length > 0
+      ? `${result.error.message} ${result.error.issues.join('; ')}`
+      : result.error.message;
+    return {
+      loadedWorkflow: null,
+      view: {
+        status: 'invalid',
+        source: {
+          kind: 'file',
+          path: workflowPath,
+          label: workflowPath ?? 'invalid workflow',
+        },
+        error,
+      },
     };
   }
 
@@ -635,6 +706,29 @@ function buildMissionArtifactRefs(resultArtifacts: unknown[]): MissionArtifactRe
       };
     })
     .filter((artifact) => artifact.path || artifact.name);
+}
+
+function buildMissionChecklistStatusView(
+  mission: Mission,
+  checklistSnapshot: ChecklistSnapshot | null,
+): MissionSummaryView['checklistStatus'] {
+  const progress = summarizeChecklistSnapshotProgress(checklistSnapshot);
+  const actionableItems = checklistSnapshot?.items.filter((item) => item.status !== 'skipped') ?? [];
+  const currentItem = getActiveChecklistItem(checklistSnapshot, {
+    preferredKinds: ['acceptance'],
+  });
+  return {
+    generationId: mission.activeGenerationId,
+    generationIndex: mission.activeGenerationIndex,
+    checklistSnapshotId: checklistSnapshot?.id ?? mission.currentChecklistSnapshotId ?? null,
+    checklistSnapshotVersion: checklistSnapshot?.version ?? mission.currentChecklistSnapshotVersion ?? null,
+    sourceRevision: checklistSnapshot?.sourceRevision ?? null,
+    totalItems: progress.totalItemCount,
+    completedItems: progress.completedItemCount,
+    blockedItems: actionableItems.filter((item) => item.status === 'blocked').length,
+    overallCompletion: progress.overallCompletion,
+    currentItem: currentItem ? { ...currentItem } : null,
+  };
 }
 
 function buildActorMetadata(

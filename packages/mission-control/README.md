@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9g-host-supervision-dispatch`: package-owned mission
+- `phase-9h-authoritative-read-models`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -60,6 +60,10 @@ Current phase:
   sync. CodexBridge host runtimes now also use package-owned supervision for
   stale mission recovery and resumable `/agent` dispatch discovery, reducing
   `loop.sh` to an operational fallback instead of a structural runtime owner.
+  Query read models now also surface authoritative workflow load status,
+  checklist progress, and workpad/attempt status views so host surfaces such
+  as `/agent show` can read those package-owned views instead of loading
+  `WORKFLOW.md` or reconstructing mission state from compatibility fields.
 
 This package should preserve the Symphony-style separation between:
 
