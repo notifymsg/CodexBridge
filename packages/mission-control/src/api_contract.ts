@@ -10,6 +10,7 @@ import type {
   PlanChangeRequest,
   WorkItem,
 } from './types.js';
+import type { MissionCycleResult } from './cycle_result.js';
 
 export interface MissionControlBoundaryMetadata {
   requestId: string;
@@ -72,6 +73,7 @@ export interface MissionSummaryView {
   summary: string | null;
   latestBlocker: string | null;
   latestVerifierSummary: string | null;
+  latestCycleResult: MissionCycleResult | null;
   finalResultSummary: string | null;
   lastResultPreview: string | null;
   lastError: string | null;
@@ -128,6 +130,7 @@ export interface MissionAttemptsView {
 export interface MissionExecutionView {
   missionId: string;
   pendingApproval: MissionPendingApproval | null;
+  latestCycleResult: MissionCycleResult | null;
   hostBindings: MissionHostBindingView;
   executionRefs: MissionExecutionRefsView;
   artifactRefs: MissionArtifactRefView[];

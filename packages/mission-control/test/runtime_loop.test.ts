@@ -189,6 +189,8 @@ continuation: allow
 
   assert.equal(result.mission.status, 'completed');
   assert.equal(result.mission.resultText, 'Patched the preview path and reran the failing tests.');
+  assert.deepEqual(result.cycleResults.map((cycle) => cycle.status), ['retry', 'done']);
+  assert.equal(result.latestCycleResult?.status, 'done');
   assert.equal(prompts.length, 2);
   assert.match(prompts[1] ?? '', /Verifier repair contract/);
   assert.match(prompts[1] ?? '', /Tests prove the fix/);
@@ -203,6 +205,8 @@ continuation: allow
   const eventKinds = repo.listEvents(mission.id).map((event) => event.kind);
   assert.ok(eventKinds.includes('mission.retrying'));
   assert.ok(eventKinds.includes('mission.completed'));
+  const finalChecklistSnapshot = repo.getChecklistSnapshotById(result.mission.currentChecklistSnapshotId);
+  assert.equal(finalChecklistSnapshot?.items.every((item) => item.status === 'completed'), true);
 });
 
 test('mission runtime continues the same attempt after a normal partial exit and counts provider turns separately from attempts', async () => {
@@ -305,6 +309,8 @@ continuation: allow
 
   assert.equal(result.mission.status, 'completed');
   assert.equal(result.mission.attemptCount, 1);
+  assert.deepEqual(result.cycleResults.map((cycle) => cycle.status), ['continue', 'done']);
+  assert.equal(result.latestCycleResult?.status, 'done');
   assert.equal(result.turnsUsed, 2);
   assert.deepEqual(waitOrder, ['run-continue-1', 'run-continue-2']);
   assert.equal(prompts.length, 2);
@@ -396,6 +402,8 @@ continuation: allow
 
   assert.equal(result.mission.status, 'failed');
   assert.match(result.mission.statusReason ?? '', /max attempts exhausted/);
+  assert.deepEqual(result.cycleResults.map((cycle) => cycle.status), ['failed']);
+  assert.equal(result.latestCycleResult?.stage, 'verifier.failed');
   assert.equal(starts, 1);
 
   const attempts = repo.listAttempts(mission.id);

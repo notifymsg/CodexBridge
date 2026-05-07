@@ -7,6 +7,14 @@ import {
   normalizeMissionRecord,
 } from './domain_records.js';
 import {
+  applyMissionVerifierResultToChecklistSnapshot,
+  createMissionCycleResult,
+  getLatestMissionCycleResult,
+  listMissionCycleResults,
+  mapMissionStatusToMissionControlOutcome,
+  type MissionCycleResult,
+} from './cycle_result.js';
+import {
   applyMissionProviderStartToAttempt,
   type MissionProvider,
   type MissionProviderArtifact,
@@ -14,7 +22,7 @@ import {
 } from './provider.js';
 import { type MissionRepository } from './repository.js';
 import { transitionMission } from './state_machine.js';
-import type { Mission, MissionAttempt, MissionEvent } from './types.js';
+import type { ChecklistSnapshot, Mission, MissionAttempt, MissionEvent } from './types.js';
 import {
   applyMissionVerifierResultToAttempt,
   applyMissionVerifierResultToMission,
@@ -57,6 +65,8 @@ export interface MissionRunResult {
   workflow: LoadedMissionWorkflow | null;
   providerResult: MissionProviderResult | null;
   verifierResult: MissionVerifierResult | null;
+  latestCycleResult: MissionCycleResult | null;
+  cycleResults: MissionCycleResult[];
   turnsUsed: number;
 }
 
@@ -102,6 +112,7 @@ export class MissionRuntime {
     options: MissionRunOptions,
   ): Promise<MissionRunResult> {
     let mission = this.ensureMissionDomainRecords(this.requireMission(missionId));
+    const initialEventCount = this.repository.listEvents(mission.id).length;
     mission = this.leaseCoordinator.claimMission(mission.id, {
       ownerId: options.ownerId,
     });
@@ -121,11 +132,24 @@ export class MissionRuntime {
         const summary = workflowResult.error.message;
         mission = this.failMissionFromCurrentState(mission, summary, null, this.now());
         this.saveMission(mission);
+        const cycleResult = this.buildMissionCycleResult({
+          mission,
+          attempt: null,
+          status: 'failed',
+          stage: 'workflow.load',
+          progress: summary,
+          blocker: summary,
+          evidence: {
+            workflowPath: workflowResult.error.workflowPath,
+            issues: [...workflowResult.error.issues],
+          },
+        });
         this.appendMissionEvent(mission, 'mission.failed', summary, null, {
           workflowPath: workflowResult.error.workflowPath,
           issues: [...workflowResult.error.issues],
+          cycleResult,
         });
-        return this.finalizeRun(mission, options.ownerId, {
+        return this.finalizeRun(mission, options.ownerId, initialEventCount, {
           attempt: null,
           workflow: null,
           providerResult: null,
@@ -166,7 +190,7 @@ export class MissionRuntime {
           if (mission.status === 'repairing') {
             continue;
           }
-          return this.finalizeRun(mission, options.ownerId, {
+          return this.finalizeRun(mission, options.ownerId, initialEventCount, {
             attempt: verification.attempt,
             workflow,
             providerResult,
@@ -193,7 +217,7 @@ export class MissionRuntime {
         lastAttempt = providerRun.attempt;
         lastProviderResult = providerRun.providerResult;
         if (providerRun.providerResult === null || mission.status !== 'verifying') {
-          return this.finalizeRun(mission, options.ownerId, {
+          return this.finalizeRun(mission, options.ownerId, initialEventCount, {
             attempt: providerRun.attempt,
             workflow,
             providerResult: providerRun.providerResult,
@@ -214,10 +238,22 @@ export class MissionRuntime {
           updatedAt: this.now(),
         });
       }
+      const cycleResult = this.buildMissionCycleResult({
+        mission,
+        attempt: lastAttempt,
+        status: 'failed',
+        stage: 'runtime.exception',
+        progress: summary,
+        blocker: summary,
+        evidence: {
+          error: summary,
+        },
+      });
       this.appendMissionEvent(mission, 'mission.failed', summary, lastAttempt, {
         error: summary,
+        cycleResult,
       });
-      return this.finalizeRun(mission, options.ownerId, {
+      return this.finalizeRun(mission, options.ownerId, initialEventCount, {
         attempt: lastAttempt,
         workflow,
         providerResult: lastProviderResult,
@@ -427,8 +463,21 @@ export class MissionRuntime {
           at: this.now(),
         });
         this.saveMission(mission);
+        const cycleResult = this.buildMissionCycleResult({
+          mission,
+          attempt: failedAttempt,
+          status: 'failed',
+          stage: 'runtime.turn_budget',
+          progress: failedResult.summary,
+          verifierSummary: failedResult.summary,
+          blocker: failedResult.summary,
+          evidence: {
+            budgetExceededReasons: [...turnIssues],
+          },
+        });
         this.appendMissionEvent(mission, 'mission.failed', failedResult.summary, failedAttempt, {
           budgetExceededReasons: [...turnIssues],
+          cycleResult,
         });
         return {
           mission,
@@ -504,9 +553,24 @@ export class MissionRuntime {
           promptDigest: digestPrompt(promptText),
           updatedAt: this.now(),
         });
+        const cycleResult = this.buildMissionCycleResult({
+          mission,
+          attempt,
+          status: 'continue',
+          stage: 'provider.continuation',
+          progress: 'Mission scheduled a continuation turn.',
+          nextStep: 'Continue the same attempt with another provider turn.',
+          blocker: null,
+          evidence: {
+            turnIndex,
+            outcome: providerResult.outcome,
+            providerRunId: attempt.providerRunId,
+          },
+        });
         this.appendMissionEvent(mission, 'mission.progress', 'Mission scheduled a continuation turn.', attempt, {
           turnIndex,
           outcome: providerResult.outcome,
+          cycleResult,
         });
         continue;
       }
@@ -528,6 +592,22 @@ export class MissionRuntime {
           lastResultPreview: preview,
         });
         this.saveMission(mission);
+        const cycleResult = this.buildMissionCycleResult({
+          mission,
+          attempt: endedAttempt,
+          status: nextStatus,
+          stage: 'provider.terminal',
+          progress: providerResult.stopReason ?? providerResult.previewText ?? providerResult.text ?? 'Mission blocked.',
+          blocker: providerResult.errorMessage ?? providerResult.stopReason,
+          needUserAction: nextStatus === 'waiting_user'
+            ? (providerResult.stopReason ?? providerResult.previewText ?? providerResult.text)
+            : null,
+          evidence: {
+            providerRunId: endedAttempt.providerRunId,
+            handoffState: providerResult.handoffState,
+            outcome: providerResult.outcome,
+          },
+        });
         this.appendMissionEvent(
           mission,
           mapMissionTerminalStatusToEventKind(nextStatus),
@@ -536,6 +616,7 @@ export class MissionRuntime {
           {
             providerRunId: endedAttempt.providerRunId,
             handoffState: providerResult.handoffState,
+            cycleResult,
           },
         );
         return {
@@ -561,8 +642,21 @@ export class MissionRuntime {
           lastResultPreview: preview,
         });
         this.saveMission(mission);
+        const cycleResult = this.buildMissionCycleResult({
+          mission,
+          attempt: endedAttempt,
+          status: 'stopped',
+          stage: 'provider.stopped',
+          progress: providerResult.stopReason ?? 'Mission stopped.',
+          blocker: providerResult.errorMessage ?? providerResult.stopReason,
+          evidence: {
+            providerRunId: endedAttempt.providerRunId,
+            outcome: providerResult.outcome,
+          },
+        });
         this.appendMissionEvent(mission, 'mission.stopped', providerResult.stopReason ?? 'Mission stopped.', endedAttempt, {
           providerRunId: endedAttempt.providerRunId,
+          cycleResult,
         });
         return {
           mission,
@@ -588,9 +682,22 @@ export class MissionRuntime {
           lastResultPreview: preview,
         });
         this.saveMission(mission);
+        const cycleResult = this.buildMissionCycleResult({
+          mission,
+          attempt: endedAttempt,
+          status: 'failed',
+          stage: 'provider.failed',
+          progress: summary,
+          blocker: summary,
+          evidence: {
+            providerRunId: endedAttempt.providerRunId,
+            outcome: providerResult.outcome,
+          },
+        });
         this.appendMissionEvent(mission, 'mission.failed', summary, endedAttempt, {
           providerRunId: endedAttempt.providerRunId,
           outcome: providerResult.outcome,
+          cycleResult,
         });
         return {
           mission,
@@ -673,6 +780,20 @@ export class MissionRuntime {
       })
       : verifierResult;
 
+    const currentChecklistSnapshot = this.repository.getChecklistSnapshotById(
+      input.mission.currentChecklistSnapshotId,
+    );
+    const updatedChecklistSnapshot = currentChecklistSnapshot
+      ? applyMissionVerifierResultToChecklistSnapshot(
+        currentChecklistSnapshot,
+        effectiveResult,
+        this.now(),
+      )
+      : null;
+    if (updatedChecklistSnapshot) {
+      this.repository.saveChecklistSnapshot(updatedChecklistSnapshot);
+    }
+
     const updatedAttempt = this.repository.saveAttempt(applyMissionVerifierResultToAttempt(
       input.attempt,
       effectiveResult,
@@ -690,10 +811,51 @@ export class MissionRuntime {
     mission = this.saveMission(mission);
 
     if (effectiveResult.verdict === 'repair') {
+      const cycleResult = this.buildMissionCycleResult({
+        mission,
+        attempt: updatedAttempt,
+        checklistSnapshot: updatedChecklistSnapshot,
+        status: 'retry',
+        stage: 'verifier.repair',
+        progress: effectiveResult.summary,
+        nextStep: 'Render a repair prompt and retry the mission within budget.',
+        verifierSummary: effectiveResult.summary,
+        blocker: effectiveResult.summary,
+        evidence: {
+          missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+        },
+      });
       this.appendMissionEvent(mission, 'mission.retrying', effectiveResult.summary, updatedAttempt, {
         missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+        cycleResult,
       });
     } else {
+      const cycleStatus = mapMissionStatusToMissionControlOutcome(mission.status) ?? 'failed';
+      const cycleResult = this.buildMissionCycleResult({
+        mission,
+        attempt: updatedAttempt,
+        checklistSnapshot: updatedChecklistSnapshot,
+        status: cycleStatus,
+        stage: `verifier.${effectiveResult.verdict}`,
+        progress: effectiveResult.summary,
+        nextStep: cycleStatus === 'done'
+          ? null
+          : cycleStatus === 'waiting_user'
+            ? 'Wait for user input before resuming the mission.'
+            : cycleStatus === 'needs_human' || cycleStatus === 'handoff'
+              ? 'Wait for human intervention before resuming the mission.'
+              : null,
+        verifierSummary: effectiveResult.summary,
+        blocker: cycleStatus === 'done' ? null : effectiveResult.summary,
+        needUserAction: cycleStatus === 'waiting_user'
+          ? effectiveResult.summary
+          : null,
+        evidence: {
+          verdict: effectiveResult.verdict,
+          missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+          budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+        },
+      });
       this.appendMissionEvent(
         mission,
         mapMissionTerminalStatusToEventKind(mission.status),
@@ -703,6 +865,7 @@ export class MissionRuntime {
           verdict: effectiveResult.verdict,
           missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
           budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+          cycleResult,
         },
       );
     }
@@ -784,15 +947,21 @@ export class MissionRuntime {
   private finalizeRun(
     mission: Mission,
     ownerId: string,
-    result: Omit<MissionRunResult, 'mission' | 'turnsUsed'>,
+    initialEventCount: number,
+    result: Omit<MissionRunResult, 'mission' | 'turnsUsed' | 'latestCycleResult' | 'cycleResults'>,
   ): MissionRunResult {
     const released = this.releaseLeaseSafely(mission.id, ownerId);
+    const cycleResults = listMissionCycleResults(
+      this.repository.listEvents(mission.id).slice(initialEventCount),
+    );
     return {
       mission: released,
       attempt: result.attempt,
       workflow: result.workflow,
       providerResult: result.providerResult,
       verifierResult: result.verifierResult,
+      latestCycleResult: cycleResults.at(-1) ?? getLatestMissionCycleResult(this.repository.listEvents(mission.id)),
+      cycleResults,
       turnsUsed: this.resolveBudgetUsage(mission.id, result.attempt, this.now()).turnCount,
     };
   }
@@ -921,6 +1090,43 @@ export class MissionRuntime {
     const savedMission = this.repository.saveMission(normalizeMissionRecord(mission));
     this.syncMissionDomainRecords(savedMission);
     return savedMission;
+  }
+
+  private buildMissionCycleResult(input: {
+    mission: Mission;
+    attempt: MissionAttempt | null;
+    checklistSnapshot?: ChecklistSnapshot | null;
+    status: MissionCycleResult['status'];
+    stage: string;
+    progress: string;
+    nextStep?: string | null;
+    verifierSummary?: string | null;
+    blocker?: string | null;
+    needUserAction?: string | null;
+    planChangeSuggestion?: Record<string, unknown> | null;
+    evidence?: Record<string, unknown>;
+  }): MissionCycleResult {
+    const checklistSnapshot = input.checklistSnapshot !== undefined
+      ? input.checklistSnapshot
+      : this.repository.getChecklistSnapshotById(input.mission.currentChecklistSnapshotId);
+    const existingEvents = this.repository.listEvents(input.mission.id);
+    return createMissionCycleResult({
+      mission: input.mission,
+      attempt: input.attempt,
+      checklistSnapshot,
+      cycle: listMissionCycleResults(existingEvents).length + 1,
+      status: input.status,
+      stage: input.stage,
+      progress: input.progress,
+      nextStep: input.nextStep,
+      verifierSummary: input.verifierSummary,
+      blocker: input.blocker,
+      needUserAction: input.needUserAction,
+      planChangeSuggestion: input.planChangeSuggestion,
+      evidence: input.evidence,
+      eventSeq: existingEvents.length + 1,
+      updatedAt: this.now(),
+    });
   }
 
   private appendMissionEvent(

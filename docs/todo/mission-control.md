@@ -107,9 +107,19 @@ that sit above host jobs and prompt turns:
 - `PlanChangeRequest`
 - `MissionGeneration`
 
+Phase 7b now adds the first typed package-owned loop protocol on top of those
+records:
+
+- `CycleResult`
+- checklist-progress helpers that map verifier outcomes back onto the active
+  `ChecklistSnapshot`
+- runtime/appended event metadata that persist typed cycle results for
+  continuation, retry, waiting, handoff, and done/failure outcomes
+
 Fresh reruns now open a new mission generation instead of destructively
-clearing prior attempt/event history, but completion semantics and typed
-cycle-result protocol work are still pending inside Phase 7.
+clearing prior attempt/event history, and runtime/API consumers can now read a
+typed cycle protocol without reconstructing loop state from bridge-local text.
+Whole-mission completion semantics are still pending inside Phase 7.
 
 Phase 8a now adds the first package-owned in-process API contract above those
 records:
@@ -548,6 +558,12 @@ Phase 7a landed: the package now persists `WorkItem`, `ChecklistSnapshot`,
 bridge-side fresh retries preserve prior runtime history by opening a new
 generation instead of wiping attempts/events.
 
+Phase 7b landed: Mission Control now emits a typed `CycleResult` after each
+meaningful runtime loop decision, persists that protocol on mission events, and
+updates checklist progress from verifier feedback so hosts can observe repair /
+continue / waiting / done outcomes without reconstructing them from raw bridge
+status strings.
+
 - [x] Add first-class `WorkItem` domain modeling distinct from host job/thread
   ids
 - [x] Add first-class `Checklist`, `ChecklistSnapshot`, and `ChecklistItem`
@@ -556,7 +572,7 @@ generation instead of wiping attempts/events.
   versioned requests instead of implicit prompt drift
 - [x] Add fixed `immutableGoal`, fixed `immutablePrompt`, and explicit
   `loopPolicy` fields to the authoritative mission model
-- [ ] Add a typed `CycleResult` contract as the package-owned loop protocol
+- [x] Add a typed `CycleResult` contract as the package-owned loop protocol
 - [x] Add `MissionGeneration`/run lineage so fresh reruns no longer clear prior
   history
 - [ ] Move completion semantics to:

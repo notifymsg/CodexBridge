@@ -35,19 +35,14 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-7a-work-item-lineage-foundations`: package boundary plus durable mission
-  domain, repository-backed persistence, typed workflow loading, canonical
-  attempt prompt contract, workpad status rendering helpers, deterministic
-  workspace assignment, recovery-safe lease coordination, provider port,
-  `CodexMissionProvider` adapter shell, verifier/budget/repair-prompt
-  primitives, package-owned retry/resume snapshot helpers, and a
-  repository-backed bounded mission runtime that drives continuation,
-  repair/retry, verifier authority, and stop/interrupt control, with
-  CodexBridge `/agent` delegating into the Mission Control runtime without
-  introducing a separate `/mission` surface, while first-class `WorkItem`,
-  `ChecklistSnapshot`, `PlanChangeRequest`, and `MissionGeneration` records
-  now preserve fresh-rerun lineage instead of destructively clearing prior
-  attempt/event history
+- `phase-8a-api-contracts-plus-cycle-results`: package-owned mission
+  domain/workflow/workspace/provider/verifier/runtime foundations, first-class
+  `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
+  `MissionGeneration` lineage, direct in-process `commands / queries / streams`
+  API contracts for `/agent`, and a typed `CycleResult` loop protocol now
+  persisted on mission events and returned from runtime runs so hosts can
+  observe continuation, repair, handoff, and completion outcomes without
+  reconstructing them from bridge-local heuristics
 
 This package should preserve the Symphony-style separation between:
 

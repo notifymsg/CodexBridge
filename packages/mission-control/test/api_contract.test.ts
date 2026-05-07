@@ -8,6 +8,7 @@ import {
   JsonFileMissionRepository,
   createMission,
   createMissionChecklistSnapshot,
+  createMissionCycleResult,
   createMissionGeneration,
   createMissionResumeSnapshot,
   createMissionWorkItem,
@@ -130,7 +131,29 @@ test('direct mission control api exposes package-owned query views with boundary
     kind: 'mission.verifying',
     summary: 'Mission moved into verification.',
     detail: null,
-    metadata: { source: 'test' },
+    metadata: {
+      source: 'test',
+      cycleResult: createMissionCycleResult({
+        mission: verifying,
+        attempt,
+        checklistSnapshot: createMissionChecklistSnapshot(verifying, {
+          at: nowRef.value + 6,
+          generationId: verifying.activeGenerationId,
+        }),
+        cycle: 1,
+        status: 'retry',
+        stage: 'verifier.repair',
+        progress: 'Verification found missing release dry-run evidence.',
+        nextStep: 'Retry the mission with the missing verification evidence.',
+        verifierSummary: 'Verification found missing release dry-run evidence.',
+        blocker: 'Release dry-run evidence is still missing.',
+        evidence: {
+          missingAcceptanceCriteria: ['Release dry-run passes'],
+        },
+        eventSeq: 1,
+        updatedAt: nowRef.value + 33,
+      }),
+    },
     createdAt: nowRef.value + 33,
   };
 
@@ -167,6 +190,7 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(listResult.data[0]?.pendingApproval?.requestId, 'approval-api-1');
   assert.equal(listResult.data[0]?.executionRefs.providerRunId, 'run-api-1');
   assert.equal(listResult.data[0]?.artifactRefs[0]?.path, '/tmp/report.md');
+  assert.equal(listResult.data[0]?.latestCycleResult?.status, 'retry');
 
   const detailResult = await api.queries.getMissionDetail({
     meta: {
@@ -183,6 +207,7 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(detailResult.data?.currentChecklistSnapshot?.id, verifying.currentChecklistSnapshotId);
   assert.equal(detailResult.data?.planChangeRequests.length, 1);
   assert.equal(detailResult.data?.attempts.length, 1);
+  assert.equal(detailResult.data?.latestCycleResult?.stage, 'verifier.repair');
 
   const timelineResult = await api.queries.getMissionTimeline({
     meta: {
@@ -225,6 +250,7 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(executionResult.data?.hostBindings.bridgeSessionId, 'session-api-1');
   assert.equal(executionResult.data?.executionRefs.workflowPath, '/repo/.codexbridge/mission/WORKFLOW.md');
   assert.equal(executionResult.data?.artifactRefs[0]?.name, 'report.md');
+  assert.equal(executionResult.data?.latestCycleResult?.audit.eventSeq, 1);
 });
 
 test('direct mission control api commands persist retry, resume, and stop transitions', async () => {

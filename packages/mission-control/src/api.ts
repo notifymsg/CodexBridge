@@ -4,6 +4,7 @@ import {
   mapMissionStatusToGenerationStatus,
 } from './domain_records.js';
 import { createMissionResumeSnapshot } from './control_actions.js';
+import { getLatestMissionCycleResult } from './cycle_result.js';
 import type { MissionRepository } from './repository.js';
 import { transitionMission } from './state_machine.js';
 import type {
@@ -274,12 +275,14 @@ export class DirectMissionControlApi implements MissionControlApi {
 
   private buildMissionSummaryView(mission: Mission): MissionSummaryView {
     const workItem = this.repository.getWorkItemById(mission.workItemId);
+    const events = this.repository.listEvents(mission.id);
     return {
       workItem,
       mission,
       summary: mission.workpad.summary,
       latestBlocker: mission.workpad.latestBlocker,
       latestVerifierSummary: mission.workpad.latestVerifierSummary,
+      latestCycleResult: getLatestMissionCycleResult(events),
       finalResultSummary: mission.workpad.finalResultSummary,
       lastResultPreview: mission.lastResultPreview,
       lastError: mission.lastError,
@@ -302,9 +305,11 @@ export class DirectMissionControlApi implements MissionControlApi {
   }
 
   private buildMissionExecutionView(mission: Mission): MissionExecutionView {
+    const events = this.repository.listEvents(mission.id);
     return {
       missionId: mission.id,
       pendingApproval: clonePendingApproval(mission.pendingApproval),
+      latestCycleResult: getLatestMissionCycleResult(events),
       hostBindings: buildMissionHostBindings(mission),
       executionRefs: this.buildMissionExecutionRefs(mission),
       artifactRefs: buildMissionArtifactRefs(mission.resultArtifacts),
