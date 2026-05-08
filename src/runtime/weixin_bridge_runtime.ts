@@ -2,6 +2,7 @@ import { parseSlashCommand } from '../core/command_parser.js';
 import { writeSequencedDebugLog } from '../core/sequenced_stderr.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 import { createI18n, type Translator } from '../i18n/index.js';
+import type { MissionHostNotification } from '../../packages/mission-control/src/index.js';
 import type {
   InboundTextEvent,
   PlatformMediaDeliveryResult,
@@ -66,6 +67,7 @@ interface BridgeCoordinatorLike {
     options: {
       onProgress?: ((progress: ProviderTurnProgress) => Promise<void>) | null;
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
+      onNotification?: ((notification: MissionHostNotification) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
   runAutomationJob?(
@@ -75,6 +77,10 @@ interface BridgeCoordinatorLike {
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
+  renderAgentMissionNotification?(
+    job: any,
+    notification: MissionHostNotification,
+  ): Promise<string | null> | string | null;
   cleanupInternalProviderThreads?(params?: { dryRun?: boolean; limit?: number }): Promise<unknown>;
 }
 
@@ -167,6 +173,8 @@ export class WeixinBridgeRuntime {
 
   backgroundTasks: Set<Promise<RuntimeResponse>>;
 
+  scheduledAgentJobIds: Set<string>;
+
   scopeChains: Map<string, Promise<RuntimeResponse>>;
 
   pendingInboundMerges: Map<string, PendingInboundMerge>;
@@ -217,6 +225,7 @@ export class WeixinBridgeRuntime {
     this.i18n = createI18n(locale);
     this.poller = null;
     this.backgroundTasks = new Set();
+    this.scheduledAgentJobIds = new Set();
     this.scopeChains = new Map();
     this.pendingInboundMerges = new Map();
     this.pendingScopeNotices = new Map();
@@ -230,7 +239,11 @@ export class WeixinBridgeRuntime {
   async start(): Promise<void> {
     await this.platformPlugin.start();
     this.automationJobs?.resetRunningJobs?.();
-    this.agentJobs?.resetRunningJobs?.();
+    if (typeof this.agentJobs?.recoverSupervisableMissions === 'function') {
+      this.agentJobs.recoverSupervisableMissions();
+    } else {
+      this.agentJobs?.resetRunningJobs?.();
+    }
     this.startAutomationScheduler();
     this.startInternalThreadCleanupScheduler();
     this.poller = new WeixinPoller({
@@ -1294,12 +1307,26 @@ export class WeixinBridgeRuntime {
         this.trackBackgroundTask(task);
       }
     }
-    const agentJobs = this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
+    const agentJobs = typeof this.agentJobs?.claimSupervisableJobs === 'function'
+      ? this.agentJobs.claimSupervisableJobs('weixin')
+      : this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
     if (!Array.isArray(agentJobs)) {
       return;
     }
     for (const job of agentJobs) {
-      const task = this.runAgentJob(job);
+      const jobId = typeof job?.id === 'string' ? job.id : '';
+      if (jobId && this.scheduledAgentJobIds.has(jobId)) {
+        continue;
+      }
+      if (jobId) {
+        this.scheduledAgentJobIds.add(jobId);
+      }
+      const task = this.runAgentJob(job)
+        .finally(() => {
+          if (jobId) {
+            this.scheduledAgentJobIds.delete(jobId);
+          }
+        });
       this.trackBackgroundTask(task);
     }
     const reminders = this.assistantRecords?.claimDueReminders?.('weixin') ?? [];
@@ -1330,7 +1357,7 @@ export class WeixinBridgeRuntime {
   async runAgentJob(job: any): Promise<RuntimeResponse> {
     const scopeId = String(job?.externalScopeId ?? '');
     if (!scopeId || await this.isScopeBusyForAgent(job)) {
-      if (job?.id) {
+      if (job?.id && typeof this.agentJobs?.claimSupervisableJobs !== 'function') {
         this.agentJobs?.updateJob?.(job.id, {
           status: 'queued',
           running: false,
@@ -1401,6 +1428,9 @@ export class WeixinBridgeRuntime {
         onApprovalRequest: async () => {
           await this.notifyApprovalPrompt(event);
         },
+        onNotification: async (notification) => {
+          await this.handleAgentMissionNotification(event, job, notification);
+        },
       }) ?? {
         type: 'message',
         messages: [],
@@ -1424,6 +1454,20 @@ export class WeixinBridgeRuntime {
       await typingStart;
       await stopTypingKeepalive();
     }
+  }
+
+  async handleAgentMissionNotification(
+    event: InboundTextEvent,
+    job: any,
+    notification: MissionHostNotification,
+  ): Promise<void> {
+    const content = typeof this.bridgeCoordinator.renderAgentMissionNotification === 'function'
+      ? await this.bridgeCoordinator.renderAgentMissionNotification(job, notification)
+      : null;
+    if (!content) {
+      return;
+    }
+    await this.ensureScopeNoticeDelivered(event.externalScopeId, content);
   }
 
   async runAutomationJob(job: any): Promise<RuntimeResponse> {

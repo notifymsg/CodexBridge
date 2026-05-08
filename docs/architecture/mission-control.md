@@ -378,6 +378,10 @@ Source-layer rules:
   depend on normalized work-item semantics rather than vendor-specific payloads
 - checklist ownership may live beside a work-item source, but runtime truth
   still belongs to Mission Control snapshots
+- pristine `draft`/`queued` missions may be re-synced from source through a
+  package-owned command before attempts start; once attempts or plan-change
+  history exist, source drift should become explicit runtime/human handling
+  instead of a destructive in-place rewrite
 
 ### 2. Workflow Contract Layer
 
@@ -599,14 +603,13 @@ source of truth. Instead it stores:
 - the currently active internal checklist snapshot version
 - a digest/hash for audit and replay safety
 
-Suggested shape:
+Current package-aligned v0 shape:
 
 ```ts
 type MissionStatus =
-  | "drafting"
+  | "draft"
   | "awaiting_checklist_confirm"
   | "awaiting_prompt_confirm"
-  | "ready"
   | "queued"
   | "planning"
   | "running"
@@ -615,6 +618,7 @@ type MissionStatus =
   | "waiting_user"
   | "needs_human"
   | "scope_change_pending"
+  | "handoff"
   | "blocked"
   | "max_loops_reached"
   | "completed"
@@ -630,27 +634,33 @@ type MissionSource =
   | "github"
   | "linear"
   | "local-todo"
-  | "kanban";
+  | "cli";
 
 type Mission = {
   id: string;
   workItemId: string;
   source: MissionSource;
-  sourceRef?: string;
+  sourceRef: string | null;
   platform: string;
   externalScopeId: string;
   title: string;
   immutableGoal: string;
   immutablePrompt: string;
-  promptHash: string;
-  promptConfirmedAt: number;
-  promptConfirmedBy: string;
+  loopPolicy: {
+    maxAttempts: number | null;
+    maxTurns: number | null;
+    maxCycles: number | null;
+    maxNoProgressCycles: number | null;
+  };
+  activeGenerationId: string;
+  activeGenerationIndex: number;
+  generationCount: number;
+  currentChecklistSnapshotId: string;
+  currentChecklistSnapshotVersion: number;
+  goal: string;
   expectedOutput: string;
-  acceptanceRule: string | null;
-  checklistRef: string;
-  checklistProvider: "markdown" | "local-todo" | "kanban" | "github" | "linear";
-  activeChecklistVersionId: string;
-  activeChecklistHash: string;
+  acceptanceCriteria: string[];
+  plan: string[];
   status: MissionStatus;
   priority: "low" | "normal" | "high";
   riskLevel: "low" | "medium" | "high";
@@ -660,30 +670,37 @@ type Mission = {
   providerProfileId: string;
   bridgeSessionId: string | null;
   codexThreadId: string | null;
-  currentGenerationId: string;
-  currentCycle: number;
-  currentItemId: string | null;
+  activeAttemptId: string | null;
   attemptCount: number;
   maxAttempts: number;
   maxTurns: number;
-  maxCycles: number | null;
-  maxNoProgressCycles: number | null;
   lastRunAt: number | null;
   completedAt: number | null;
+  archivedAt: number | null;
   stoppedAt: number | null;
   lastResultPreview: string | null;
   resultText: string | null;
   resultArtifacts: unknown[];
   lastError: string | null;
-  latestVerifierSummary: string | null;
-  latestBlocker: string | null;
-  nextStep: string | null;
-  overallCompletion: number | null;
+  statusReason: string | null;
+  stopRequest: MissionStopRequest | null;
+  pendingApproval: MissionPendingApproval | null;
+  lease: MissionLease | null;
   workpad: MissionWorkpad;
   createdAt: number;
   updatedAt: number;
 };
 ```
+
+Current implementation notes:
+
+- the package currently folds the spec-level `ready` staging into `queued`
+  once the immutable prompt is confirmed
+- `handoff` is a persisted paused mission state in the current package so
+  hosts can distinguish an explicit transfer from generic `needs_human`
+  intervention without inferring it from event text
+- `kanban` and broader board-style work-item sources remain later-source scope;
+  the current package contract only ships the source values above
 
 #### `Checklist` and `ChecklistSnapshot`
 
@@ -699,42 +716,45 @@ Mission Control should not trust a mutable external markdown file or online
 board at replay time. It must capture a versioned immutable snapshot every time
 an approved checklist changes.
 
-Suggested snapshot shape:
+Current package-aligned snapshot shape:
 
 ```ts
 type ChecklistSnapshot = {
   id: string;
   missionId: string;
+  workItemId: string;
+  generationId: string | null;
   version: number;
-  sourceRef: string;
+  source: MissionSource;
+  sourceRef: string | null;
   sourceRevision: string | null;
-  hash: string;
-  createdAt: number;
-  createdBy: string;
-  changeReason: string | null;
+  expectedOutput: string | null;
+  acceptanceCriteria: string[];
+  plan: string[];
   items: ChecklistItem[];
+  hash: string;
+  supersededAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 };
 ```
 
 Each `ChecklistItem` is the minimum completion unit:
 
 ```ts
-type ChecklistItemStatus =
-  | "pending"
-  | "in_progress"
-  | "completed"
-  | "blocked"
-  | "dropped";
+type ChecklistItemKind = "deliverable" | "acceptance" | "plan";
+type ChecklistItemStatus = "pending" | "completed" | "blocked" | "skipped";
 
 type ChecklistItem = {
   id: string;
-  stableKey: string;
+  kind: ChecklistItemKind;
   title: string;
-  doneCriteria: string[];
+  detail: string | null;
+  order: number;
   status: ChecklistItemStatus;
-  dependsOn: string[];
-  notes: string[];
-  evidenceRefs: string[];
+  sourceRef: string | null;
+  completionSummary: string | null;
+  completedAt: number | null;
 };
 ```
 
@@ -750,13 +770,16 @@ Checklist editing rules:
 type PlanChangeRequest = {
   id: string;
   missionId: string;
-  baseChecklistVersionId: string;
-  proposedChecklistVersionId: string;
-  reason: string;
-  proposedBy: "ai" | "user" | "system";
-  status: "pending" | "approved" | "rejected" | "auto-applied";
+  generationId: string | null;
+  checklistSnapshotId: string | null;
+  status: "proposed" | "approved" | "rejected" | "applied";
+  rationale: string;
+  proposedExpectedOutput: string | null;
+  proposedAcceptanceCriteria: string[];
+  proposedPlan: string[];
   createdAt: number;
-  resolvedAt: number | null;
+  decidedAt: number | null;
+  decidedBy: string | null;
 };
 ```
 
@@ -766,9 +789,27 @@ type PlanChangeRequest = {
 type MissionGeneration = {
   id: string;
   missionId: string;
+  workItemId: string;
   index: number;
-  reason: "initial" | "retry" | "resume" | "manual-rerun" | "system-recovery";
+  trigger: "initial" | "retry" | "resume";
+  parentGenerationId: string | null;
+  checklistSnapshotId: string | null;
+  status:
+    | "active"
+    | "completed"
+    | "failed"
+    | "stopped"
+    | "blocked"
+    | "waiting_user"
+    | "needs_human"
+    | "handoff"
+    | "superseded";
+  attemptCount: number;
+  summary: string | null;
   createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  supersededAt: number | null;
 };
 ```
 
@@ -807,24 +848,23 @@ type MissionAttempt = {
   id: string;
   missionId: string;
   generationId: string;
-  checklistVersionId: string;
-  checklistItemId: string | null;
+  generationIndex: number;
+  checklistSnapshotId: string;
   index: number;
-  cycle: number;
   status:
-    | "queued"
     | "running"
     | "verifying"
     | "repairing"
-    | "completed"
-    | "failed"
-    | "blocked"
     | "waiting_user"
     | "needs_human"
+    | "handoff"
+    | "blocked"
+    | "completed"
+    | "failed"
     | "stopped";
   providerRunId: string | null;
   providerThreadId: string | null;
-  renderedPromptHash: string | null;
+  promptDigest: string | null;
   startedAt: number | null;
   endedAt: number | null;
   verifierVerdict:
@@ -837,39 +877,55 @@ type MissionAttempt = {
     | "failed"
     | null;
   verifierSummary: string | null;
-  verifierProofId: string | null;
+  missingAcceptanceCriteria: string[];
   outputPreview: string | null;
   error: string | null;
+  createdAt: number;
+  updatedAt: number;
 };
 
 type MissionEvent = {
   id: string;
   missionId: string;
   attemptId: string | null;
-  checklistItemId: string | null;
   kind:
     | "mission.created"
-    | "mission.ready"
+    | "mission.source_synced"
+    | "mission.awaiting_checklist_confirm"
+    | "mission.awaiting_prompt_confirm"
     | "mission.queued"
-    | "mission.planned"
+    | "mission.stop_requested"
+    | "mission.planning"
     | "mission.started"
     | "mission.progress"
     | "mission.verifying"
     | "mission.retrying"
     | "mission.waiting_user"
     | "mission.needs_human"
-    | "mission.handoff"
     | "mission.scope_change_pending"
+    | "mission.plan_change_applied"
+    | "mission.plan_change_rejected"
+    | "mission.handoff"
     | "mission.blocked"
     | "mission.max_loops_reached"
     | "mission.completed"
     | "mission.failed"
     | "mission.stopped"
-    | "checklist.snapshot.created"
-    | "plan_change.requested"
-    | "plan_change.approved"
-    | "plan_change.rejected";
-  payload: Record<string, unknown>;
+    | "mission.archived"
+    | "attempt.created"
+    | "attempt.started"
+    | "attempt.progress"
+    | "attempt.verifying"
+    | "attempt.completed"
+    | "attempt.failed"
+    | "attempt.stopped"
+    | "workpad.updated"
+    | "lease.acquired"
+    | "lease.heartbeat"
+    | "lease.released";
+  summary: string;
+  detail: string | null;
+  metadata: Record<string, unknown>;
   createdAt: number;
 };
 ```
@@ -919,62 +975,103 @@ The state machine must be explicit. Long-running behavior should never be
 hidden inside ad-hoc retries.
 
 ```text
-drafting
+draft
   -> awaiting_checklist_confirm
   -> awaiting_prompt_confirm
-  -> ready
   -> queued
-  -> planning
+queued
   -> running
-  -> verifying
-    -> completed
-    -> repairing -> running
-    -> waiting_user
-    -> needs_human
-    -> scope_change_pending
-    -> blocked
-    -> failed
-running/verifying/repairing
-  -> stopped
-running/verifying/repairing
+  -> planning
   -> max_loops_reached
+  -> stopped
+planning
+  -> running
+  -> failed
+  -> max_loops_reached
+  -> stopped
+running
+  -> verifying
+  -> waiting_user
+  -> needs_human
+  -> handoff
+  -> blocked
+  -> failed
+  -> stopped
+verifying
+  -> queued
+  -> repairing
+  -> completed
+  -> waiting_user
+  -> needs_human
+  -> handoff
+  -> scope_change_pending
+  -> blocked
+  -> failed
+  -> max_loops_reached
+  -> stopped
+repairing
+  -> queued
+  -> running
+  -> waiting_user
+  -> needs_human
+  -> handoff
+  -> scope_change_pending
+  -> blocked
+  -> failed
+  -> max_loops_reached
+  -> stopped
+waiting_user/needs_human/handoff/blocked
+  -> queued
+  -> running
+  -> stopped
+  -> archived
+scope_change_pending
+  -> queued
+  -> running
+  -> stopped
+  -> archived
 completed/failed/stopped/max_loops_reached
   -> archived
 ```
 
 Required transition rules:
 
-- `drafting -> awaiting_checklist_confirm`: initial checklist exists but is not
+- `draft -> awaiting_checklist_confirm`: initial checklist exists but is not
   user-confirmed yet
 - `awaiting_checklist_confirm -> awaiting_prompt_confirm`: checklist is
   confirmed and prompt still needs user confirmation
-- `awaiting_prompt_confirm -> ready`: immutable prompt is confirmed
-- `ready -> queued`: mission can enter the orchestrated loop
+- `awaiting_prompt_confirm -> queued`: immutable prompt confirmation
+  immediately hands the mission to the package-owned queue boundary; the
+  current package does not persist a separate `ready` state
 - `queued -> planning`: workflow and prompt can be rendered
 - `planning -> running`: workspace and provider context are ready
 - `running -> verifying`: provider returned a candidate result
-- `verifying -> planning`: current cycle is accepted and the mission should
+- `verifying -> queued`: current cycle is accepted and the mission should
   continue into another loop iteration with updated context or the next
-  checklist item
+  checklist item; supervision/runtime re-enters `planning` from that queue
+  boundary
 - `verifying -> repairing`: verifier says the goal is not complete but can be
   fixed within budget
 - `verifying -> waiting_user`: verifier needs user input before the current
   checklist item can continue
 - `verifying -> needs_human`: verifier decides the mission needs explicit human
   intervention
-- `verifying -> needs_human` with handoff metadata: verifier requires explicit
-  transfer to a human or another execution surface
+- `running` or `verifying -> handoff`: provider or verifier requires an
+  explicit transfer to a human or another execution surface, and the package
+  persists that paused state directly
 - `verifying -> scope_change_pending`: AI requested a formal checklist change
   beyond auto-apply policy
 - `verifying -> blocked`: verifier requires human input or missing permission
 - `verifying -> failed`: retry/turn/time budget is exhausted or verifier marks
   unrecoverable failure
-- `blocked/waiting_user/needs_human -> running`: human approves or supplies the
-  missing input
-- `scope_change_pending -> planning`: a new checklist snapshot is approved and
-  activated
-- `running/verifying/repairing -> max_loops_reached`: loop policy forbids more
-  cycles
+- `blocked/waiting_user/needs_human/handoff -> queued`: human approves or
+  supplies the missing input, and the mission re-enters through the
+  package-owned queue boundary
+- `scope_change_pending -> queued`: a plan change is approved or rejected, the
+  active checklist snapshot is resolved, and the mission is re-queued
+- `queued/planning/repairing -> max_loops_reached`: loop policy forbids more
+  cycles before the next autonomous cycle starts, whether from
+  `maxCycles` exhaustion or repeated `maxNoProgressCycles` churn
 - `running/verifying/repairing -> stopped`: explicit user stop
 
 Definition of done:
@@ -993,14 +1090,17 @@ The spec must distinguish between:
 - verifier/control outcomes returned after a cycle
 - host-facing labels shown in chat or web UI
 
-`continue`, `retry`, `handoff`, and `done` are control outcomes. They are not
-all mission states.
+`continue`, `retry`, and `done` are control outcomes. `waiting_user`,
+`needs_human`, `handoff`, and `blocked` also persist as stable package-owned
+mission states so hosts can render and resume them without reconstructing
+pause semantics from raw provider text.
 
 Outcome rules:
 
 - `continue`: the latest cycle made enough progress to keep going without human
-  intervention. The mission should usually transition `verifying -> planning`,
-  then run another cycle. This can mean:
+  intervention. The current package transitions `verifying -> queued`, then
+  supervision/runtime re-enters `planning` before the next provider turn. This
+  can mean:
   - the current checklist item still needs another execution pass, or
   - the current checklist item is done and the next incomplete item should
     start
@@ -1013,10 +1113,10 @@ Outcome rules:
   state.
 - `needs_human`: a human operator, approver, or domain expert must intervene.
   This is a stable mission state and is broader than `waiting_user`.
-- `handoff`: a special verifier/control outcome meaning the mission should be
-  explicitly transferred out of the current autonomous loop. `handoff` should
-  emit a `mission.handoff` event and usually persist the mission in
-  `needs_human`, unless policy maps it to another paused state.
+- `handoff`: an explicit paused state and control outcome meaning the mission
+  should be transferred out of the current autonomous loop. It emits
+  `mission.handoff` and remains distinguishable from generic
+  `needs_human` intervention in the current package contract.
 - `done`: not a standalone mission status. It means the active checklist item
   is complete, every remaining checklist item is also complete, and the
   immutable mission goal passes final verification. Only then should the
@@ -1039,11 +1139,11 @@ type MissionControlOutcome =
 
 Recommended outcome-to-state mapping:
 
-- `continue` -> `planning`
+- `continue` -> `queued`
 - `retry` -> `repairing`
 - `waiting_user` -> `waiting_user`
 - `needs_human` -> `needs_human`
-- `handoff` -> `needs_human` plus `mission.handoff` event
+- `handoff` -> `handoff` plus `mission.handoff`
 - `done` -> `completed` only after whole-mission completion rules pass
 - `blocked` -> `blocked`
 - `failed` -> `failed`
@@ -1097,6 +1197,12 @@ Suggested persisted metadata:
 
 ```ts
 type MissionEnvironmentStamp = {
+  id: string;
+  missionId: string;
+  generationId: string;
+  generationIndex: number;
+  attemptId: string | null;
+  cycle: number;
   cwd: string | null;
   workspacePath: string | null;
   gitSha: string | null;
@@ -1111,7 +1217,9 @@ type MissionCheckpoint = {
   missionId: string;
   attemptId: string | null;
   generationId: string;
+  generationIndex: number;
   cycle: number;
+  stage: string;
   summary: string;
   payload: Record<string, unknown>;
   createdAt: number;
@@ -1530,6 +1638,11 @@ Temporary external supervisor scripts may still exist as migration tooling or
 operational fallback, but the target architecture is for Mission Control itself
 to own supervision, recovery, and observability semantics.
 
+The current tracked loop prompt used by that migration-era external supervisor
+is versioned in
+[`mission-control-loop-prompt.md`](./mission-control-loop-prompt.md) and
+mirrored locally into `.codexbridge/mission/mission-control.prompt.md`.
+
 ### 5.6.5 Interface Contract
 
 Mission Control should expose the same conceptual API whether used by direct
@@ -1541,136 +1654,180 @@ API groups:
 - `queries`: fetch current and historical state
 - `streams`: subscribe to status/events
 
-Suggested command surface:
+Current package-owned v0 command surface:
 
 ```ts
-type MissionRequestMeta = {
-  requestId?: string | null;
-  correlationId?: string | null;
-  idempotencyKey?: string | null;
+type MissionControlBoundaryMetadata = {
+  requestId: string;
+  correlationId: string | null;
+  idempotencyKey: string | null;
 };
 
-type CreateMissionRequest = {
-  meta?: MissionRequestMeta;
-  workItemId?: string | null;
-  source: string;
-  sourceRef?: string | null;
-  title: string;
-  immutableGoal: string;
-  immutablePrompt: string;
-  checklistRef: string;
-  checklistProvider: string;
-  initialChecklistVersionId: string;
-  loopPolicy?: {
-    maxAttempts?: number | null;
-    maxTurns?: number | null;
-    maxCycles?: number | null;
-    maxNoProgressCycles?: number | null;
-  };
-  actor?: {
-    id?: string | null;
-    displayName?: string | null;
-  };
+type MissionControlRequest<TInput> = {
+  meta: MissionControlBoundaryMetadata;
+  input: TInput;
 };
 
-type MissionCommandResponse = {
-  missionId: string;
-  status: string;
-  accepted: boolean;
-  correlationId?: string | null;
+type MissionControlResponse<TData> = {
+  meta: MissionControlBoundaryMetadata;
+  data: TData;
 };
 
-interface MissionCommands {
-  createMission(input: CreateMissionRequest): Promise<MissionCommandResponse>;
-  startMission(input: { missionId: string }): Promise<MissionCommandResponse>;
-  stopMission(input: { missionId: string; reason?: string }): Promise<MissionCommandResponse>;
-  retryMission(input: { missionId: string; reason?: string }): Promise<MissionCommandResponse>;
-  resumeMission(input: { missionId: string; reason?: string }): Promise<MissionCommandResponse>;
-  submitApproval(input: {
-    missionId: string;
-    approvalId: string;
-    decision: "approved" | "rejected";
-  }): Promise<MissionCommandResponse>;
-  applyPlanChange(input: {
-    missionId: string;
-    changeRequestId: string;
-    decision: "approved" | "rejected";
-  }): Promise<MissionCommandResponse>;
+type MissionControlActor = {
+  actorId: string | null;
+  actorType: "user" | "host" | "system";
+};
+
+interface MissionControlCommands {
+  createMission(
+    request: MissionControlRequest<{
+      missionId: string;
+      workItem: WorkItemSourceSummary;
+      platform: string;
+      externalScopeId: string;
+      providerProfileId: string;
+      loopPolicy?: Partial<MissionLoopPolicy> | null;
+      initialStatus?: "draft" | "queued";
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  startMission(
+    request: MissionControlRequest<{
+      missionId: string;
+      confirmChecklist?: boolean | null;
+      confirmPrompt?: boolean | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  submitApproval(
+    request: MissionControlRequest<{
+      missionId: string;
+      approvalId?: string | null;
+      decision: "approve" | "reject";
+      reason?: string | null;
+      responseText?: string | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  syncMissionSource(
+    request: MissionControlRequest<{
+      missionId: string;
+      workItem: WorkItemSourceSummary;
+      reason?: string | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  proposePlanChange(
+    request: MissionControlRequest<{
+      missionId: string;
+      rationale: string;
+      proposedExpectedOutput?: string | null;
+      proposedAcceptanceCriteria?: string[] | null;
+      proposedPlan?: string[] | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  resolvePlanChange(
+    request: MissionControlRequest<{
+      missionId: string;
+      planChangeRequestId?: string | null;
+      decision: "approve" | "reject";
+      reason?: string | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  retryMission(
+    request: MissionControlRequest<{
+      missionId: string;
+      reason?: string | null;
+      hostSessionId?: string | null;
+      providerThreadId?: string | null;
+      bridgeSessionId?: string | null;
+      codexThreadId?: string | null;
+      workflowPath?: string | null;
+      workspacePath?: string | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  resumeMission(
+    request: MissionControlRequest<{
+      missionId: string;
+      reason?: string | null;
+      responseText?: string | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
+  stopMission(
+    request: MissionControlRequest<{
+      missionId: string;
+      reason?: string | null;
+      actor?: MissionControlActor | null;
+    }>,
+  ): MissionControlResponse<MissionDetailView>;
 }
 ```
 
-Suggested query surface:
+Current package-owned v0 query surface:
 
 ```ts
-type MissionSummary = {
-  missionId: string;
-  title: string;
-  status: string;
-  currentCycle: number;
-  currentItemId: string | null;
-  overallCompletion: number | null;
-  updatedAt: string;
-};
-
-interface MissionQueries {
-  getMission(input: { missionId: string }): Promise<Mission>;
-  listMissions(input?: {
-    status?: string[];
-    source?: string[];
-    limit?: number;
-    cursor?: string | null;
-  }): Promise<{ items: MissionSummary[]; nextCursor?: string | null }>;
-  getMissionBundle(input: { missionId: string }): Promise<{
-    mission: Mission;
-    activeChecklistSnapshot: ChecklistSnapshot | null;
-    latestWorkpad: MissionWorkpad | null;
-    latestAttempt: MissionAttempt | null;
-  }>;
-  getMissionTimelineView(input: { missionId: string }): Promise<{
-    mission: Mission;
-    generations: MissionGeneration[];
-    attempts: MissionAttempt[];
-    events: MissionEvent[];
-    artifacts: MissionArtifactRef[];
-    verifierProofs: MissionVerifierProof[];
-  }>;
-  getMissionTimeline(input: {
-    missionId: string;
-    afterSeq?: number | null;
-  }): Promise<MissionEvent[]>;
-  getMissionExecutionRefs(input: { missionId: string }): Promise<{
-    missionId: string;
-    platform: string;
-    externalScopeId: string;
-    hostSessionId: string | null;
-    providerThreadId: string | null;
-    latestProviderRunId: string | null;
-    artifactRefs: Array<{ type: string; name?: string; path?: string; uri?: string }>;
-  }>;
-  listAttempts(input: { missionId: string }): Promise<MissionAttempt[]>;
-  listEvents(input: { missionId: string; afterSeq?: number | null }): Promise<MissionEvent[]>;
-  listPlanChangeRequests(input: { missionId: string }): Promise<PlanChangeRequest[]>;
+interface MissionControlQueries {
+  listMissionSummaries(
+    request: MissionControlRequest<{
+      filter?: {
+        platform?: string | null;
+        externalScopeId?: string | null;
+        providerProfileId?: string | null;
+        statuses?: MissionStatus[] | null;
+        sources?: MissionSource[] | null;
+      } | null;
+    }>,
+  ): MissionControlResponse<MissionSummaryView[]>;
+  getMissionDetail(
+    request: MissionControlRequest<{ missionId: string }>,
+  ): MissionControlResponse<MissionDetailView | null>;
+  getMissionTimeline(
+    request: MissionControlRequest<{ missionId: string }>,
+  ): MissionControlResponse<MissionTimelineView | null>;
+  getMissionAttempts(
+    request: MissionControlRequest<{ missionId: string }>,
+  ): MissionControlResponse<MissionAttemptsView | null>;
+  getMissionExecution(
+    request: MissionControlRequest<{ missionId: string }>,
+  ): MissionControlResponse<MissionExecutionView | null>;
+  getMissionLoopSnapshot(
+    request: MissionControlRequest<{ missionId: string }>,
+  ): MissionControlResponse<MissionLoopSnapshotView | null>;
 }
 ```
 
-Suggested stream surface:
+Query read-model guidance:
+
+- summary/detail query views should already carry resolved workflow load state
+  so hosts do not load `WORKFLOW.md` directly just to explain mission policy
+- query views should expose authoritative checklist progress/current-item data
+  derived from `ChecklistSnapshot` + `MissionGeneration`, rather than forcing
+  hosts to infer progress from prompt text or host-local caches
+- rendered workpad/attempt status views should come from package-owned mission
+  state so chat/web/CLI surfaces can present the same runtime truth without
+  reconstructing it in each host
+
+Current package-owned v0 stream surface:
 
 ```ts
-interface MissionStreams {
-  streamMissionEvents(input: {
-    missionId: string;
-    afterSeq?: number | null;
-  }): AsyncIterable<MissionEvent>;
-  streamMissionSnapshots(input: {
-    missionId: string;
-  }): AsyncIterable<{
-    missionId: string;
-    status: string;
-    currentCycle: number;
-    currentItemId: string | null;
-    overallCompletion: number | null;
-    updatedAt: string;
-  }>;
+type MissionStreamFrame =
+  | { type: "detail"; detail: MissionDetailView }
+  | { type: "timeline_entry"; entry: MissionTimelineEntry };
+
+interface MissionControlStreams {
+  streamMission(
+    request: MissionControlRequest<{
+      missionId: string;
+      includeHistory?: boolean;
+    }>,
+  ): AsyncIterable<MissionControlResponse<MissionStreamFrame>>;
+  streamMissionSnapshots(
+    request: MissionControlRequest<{ missionId: string }>,
+  ): AsyncIterable<MissionControlResponse<MissionLoopSnapshotView>>;
 }
 ```
 
@@ -1809,6 +1966,33 @@ Hard limits:
 - max no-progress cycles
 - timeout per turn
 - artifact count and size limits
+
+Current implementation note:
+
+- the package now has a first supervision foundation that can recover stale
+  leases, rebuild status snapshots from repository truth, and sequentially
+  dispatch supervisable missions (`queued`, `planning`, `running`,
+  `verifying`, `repairing`) until idle
+- mission stop control now persists an explicit `stopRequest` on the
+  authoritative mission record; runtime and supervision consume that request at
+  safe checkpoints instead of treating host-side process interruption as the
+  lifecycle source of truth
+- package-owned loop-budget exhaustion now materializes `max_loops_reached`
+  from both absolute cycle limits and consecutive no-progress cycle limits by
+  reading persisted `CycleResult` history before another autonomous cycle
+  starts
+- pristine source-backed missions can now be refreshed through a package-owned
+  source-sync command before the first attempt begins, so hosts do not need to
+  patch authoritative mission/checklist/work-item records directly just to keep
+  queued source metadata aligned
+- CodexBridge host runtimes now recover stale missions and discover resumable
+  `/agent` work through package-owned supervision rather than resetting bridge
+  projections and only scanning host-local queued jobs, which makes external
+  `loop.sh`-style supervision an operational fallback instead of a structural
+  runtime dependency
+- `waiting_user`, `needs_human`, `handoff`, and similar paused states remain
+  first-class runtime states, but they are not auto-resumed by supervision
+  without an explicit host control action such as resume/retry
 
 ### 7. Status Surface
 

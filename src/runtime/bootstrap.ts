@@ -1,4 +1,8 @@
 import path from 'node:path';
+import {
+  InMemoryMissionRepository,
+  type MissionRepository,
+} from '../../packages/mission-control/src/index.js';
 import { ActiveTurnRegistry } from '../core/active_turn_registry.js';
 import { AgentJobService } from '../core/agent_job_service.js';
 import { AssistantRecordService } from '../core/assistant_record_service.js';
@@ -29,6 +33,7 @@ interface RuntimeRepositories {
   automationJobs?: any;
   agentJobs?: any;
   assistantRecords?: any;
+  missionControl?: MissionRepository | null;
 }
 
 interface CreateCodexBridgeRuntimeOptions {
@@ -79,6 +84,7 @@ export function createCodexBridgeRuntime({
   const automationJobsRepository = repositories.automationJobs ?? new InMemoryAutomationJobRepository();
   const agentJobsRepository = repositories.agentJobs ?? new InMemoryAgentJobRepository();
   const assistantRecordsRepository = repositories.assistantRecords ?? new InMemoryAssistantRecordRepository();
+  const missionControlRepository = repositories.missionControl ?? new InMemoryMissionRepository();
 
   if (providerProfiles.length > 0) {
     const configuredProviderProfileIds = new Set(providerProfiles.map((profile) => profile.id));
@@ -115,6 +121,7 @@ export function createCodexBridgeRuntime({
   const agentJobs = new AgentJobService({
     agentJobs: agentJobsRepository,
     bridgeSessions,
+    missionRepository: missionControlRepository,
     locale,
   });
   const assistantRecords = new AssistantRecordService({
@@ -162,6 +169,7 @@ export function createCodexBridgeRuntime({
       automationJobs: automationJobsRepository,
       agentJobs: agentJobsRepository,
       assistantRecords: assistantRecordsRepository,
+      missionControl: missionControlRepository,
     },
     services: {
       activeTurns,

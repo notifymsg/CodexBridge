@@ -13,8 +13,6 @@ import {
 } from './assistant_record_service.js';
 import {
   createMissionControlledAgentJobView,
-  createAgentJobStatusView,
-  loadMissionWorkflowForAgentJob,
 } from './mission_control_agent_job_adapter.js';
 import { runAgentJobWithMissionControl } from './mission_control_agent_job_runner.js';
 import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
@@ -25,6 +23,7 @@ import {
   finalizeTurnArtifacts,
 } from './turn_artifacts.js';
 import { writeSequencedDebugLog } from './sequenced_stderr.js';
+import type { MissionHostNotification } from '../../packages/mission-control/src/index.js';
 import {
   createI18n,
   formatRelativeTimeLocalized,
@@ -42,6 +41,7 @@ import type {
   AgentJobCategory,
   AgentJobMode,
   AgentJobRiskLevel,
+  AgentJobStatus,
   AssistantRecord,
   AssistantRecordPriority,
   AssistantRecordStatus,
@@ -190,6 +190,7 @@ type StartTurnOptions = {
     providerProfileId: string;
   }) => Promise<void> | void;
   onApprovalRequest?: (request: ProviderApprovalRequest) => Promise<void> | void;
+  onNotification?: (notification: MissionHostNotification) => Promise<void> | void;
 };
 
 type ProgressHandler = ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
@@ -405,6 +406,12 @@ type AgentTargetResolution =
   | { status: 'found'; job: AgentJob; index: number }
   | { status: 'ambiguous'; value: string; candidates: Array<{ job: AgentJob; index: number }> }
   | { status: 'not_found'; value: string };
+
+type AgentStartConfirmationResolution =
+  | { status: 'found'; job: AgentJob; index: number }
+  | { status: 'ambiguous'; candidates: Array<{ job: AgentJob; index: number }> }
+  | { status: 'not_found'; value: string }
+  | { status: 'none_pending' };
 
 type AgentJobPatch = {
   title?: string;
@@ -956,6 +963,71 @@ export class BridgeCoordinator {
       return '';
     }
     return renderApprovalPromptLines(pendingApprovals, this.currentI18n).join('\n');
+  }
+
+  renderAgentMissionNotification(job: AgentJob, notification: MissionHostNotification): string | null {
+    const cycleResult = notification?.cycleResult ?? null;
+    const loopSnapshot = notification?.loopSnapshot ?? null;
+    if (!shouldRenderAgentMissionNotification(cycleResult, loopSnapshot)) {
+      return null;
+    }
+    const scopedJobs = this.agentJobs?.listForScope({
+      platform: job.platform,
+      externalScopeId: job.externalScopeId,
+    }) ?? [];
+    const index = scopedJobs.findIndex((candidate) => candidate.id === job.id);
+    const showToken = index >= 0 ? String(index + 1) : job.id;
+    const lines = [
+      this.t('coordinator.agent.notificationLoopUpdate'),
+      this.t('coordinator.agent.title', { value: job.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(
+          loopSnapshot.status,
+          isActiveMissionJobStatus(loopSnapshot.status),
+          this.currentI18n,
+        ),
+      }),
+    ];
+    if (loopSnapshot.currentCycle > 0) {
+      lines.push(this.t('coordinator.agent.loopCycle', {
+        value: String(loopSnapshot.currentCycle),
+      }));
+    }
+    if (loopSnapshot.currentStage) {
+      lines.push(this.t('coordinator.agent.loopStage', {
+        value: loopSnapshot.currentStage,
+      }));
+    }
+    if (loopSnapshot.currentProgress) {
+      lines.push(this.t('coordinator.agent.loopProgress', {
+        value: loopSnapshot.currentProgress,
+      }));
+    }
+    if (typeof loopSnapshot.overallCompletion === 'number') {
+      lines.push(this.t('coordinator.agent.loopCompletion', {
+        value: `${loopSnapshot.overallCompletion}%`,
+      }));
+    }
+    if (loopSnapshot.currentItemTitle) {
+      lines.push(this.t('coordinator.agent.currentChecklistItem', {
+        value: loopSnapshot.currentItemTitle,
+      }));
+    }
+    if (loopSnapshot.nextStep) {
+      lines.push(this.t('coordinator.agent.loopNextStep', {
+        value: loopSnapshot.nextStep,
+      }));
+    }
+    if (
+      loopSnapshot.latestVerifierSummary
+      && loopSnapshot.latestVerifierSummary !== loopSnapshot.currentProgress
+    ) {
+      lines.push(this.t('coordinator.agent.verification', {
+        value: loopSnapshot.latestVerifierSummary,
+      }));
+    }
+    lines.push(this.t('coordinator.agent.showHint', { index: showToken }));
+    return lines.join('\n');
   }
 
   async handleConversationTurn(event, options = {}) {
@@ -5829,7 +5901,7 @@ export class BridgeCoordinator {
       return this.handleAgentListCommand(event);
     }
     if (['confirm', 'c'].includes(subcommand)) {
-      return this.handleAgentConfirmCommand(event);
+      return this.handleAgentConfirmCommand(event, normalizedArgs.slice(1).join(' '));
     }
     if (['edit'].includes(subcommand)) {
       return this.handleAgentEditCommand(event);
@@ -5891,7 +5963,7 @@ export class BridgeCoordinator {
     return this.renderAgentDraftResponse(event, draft);
   }
 
-  async handleAgentConfirmCommand(event) {
+  async handleAgentConfirmCommand(event, confirmSpec = '') {
     const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'agent');
     if (activeResponse) {
       return activeResponse;
@@ -5899,9 +5971,36 @@ export class BridgeCoordinator {
     const scopeRef = toScopeRef(event);
     const operation = this.getPendingAgentOperation(scopeRef);
     if (!operation) {
-      return messageResponse([
-        this.t('coordinator.agent.noDraft'),
-      ], this.buildScopedSessionMeta(event));
+      const confirmDirective = parseAgentConfirmDirective(confirmSpec);
+      const resolved = this.resolveAgentStartConfirmation(event, confirmDirective.targetToken);
+      if (resolved.status === 'none_pending') {
+        return messageResponse([
+          this.t('coordinator.agent.noStartConfirmation'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      if (resolved.status === 'ambiguous') {
+        return this.renderAgentClarifyResponse(
+          event,
+          this.t('coordinator.agent.confirmSelect'),
+          resolved.candidates.map((candidate) => ({
+            index: candidate.index,
+            title: candidate.job.title,
+            status: formatAgentStatusLabel(candidate.job.status, candidate.job.running, this.currentI18n),
+          })),
+        );
+      }
+      if (resolved.status === 'not_found') {
+        return messageResponse([
+          this.t('coordinator.agent.notFound', { value: resolved.value || '?' }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      return this.confirmAgentStartMission(
+        event,
+        resolved.job,
+        resolved.index,
+        confirmDirective.decision,
+        confirmDirective.responseText,
+      );
     }
     if (operation.kind !== 'draft') {
       return this.confirmAgentOperation(event, scopeRef, operation);
@@ -5941,21 +6040,9 @@ export class BridgeCoordinator {
       maxAttempts: 2,
     });
     this.clearPendingAgentDraft(scopeRef);
-    const response = messageResponse([
-      this.t('coordinator.agent.created'),
-      this.t('coordinator.agent.title', { value: job.title }),
-      this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
-      this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
-      this.t('coordinator.agent.deliveryTarget'),
-      this.t('coordinator.agent.showHint', { index: this.agentJobs.listForScope(scopeRef).length }),
-    ], this.buildScopedSessionMeta(event));
-    response.meta = {
-      ...(response.meta ?? {}),
-      systemAction: {
-        kind: 'run_agent_sweep',
-      },
-    };
-    return response;
+    const created = this.agentJobs.startJob(job.id);
+    const index = this.agentJobs.listForScope(scopeRef).findIndex((entry) => entry.id === created.id) + 1;
+    return this.renderAgentMissionStartResponse(event, created, index, { created: true });
   }
 
   async handleAgentEditCommand(event) {
@@ -6015,8 +6102,9 @@ export class BridgeCoordinator {
 
   handleAgentListCommand(event) {
     const scopeRef = toScopeRef(event);
-    const jobs = this.agentJobs.listForScope(scopeRef).map((job) => createMissionControlledAgentJobView(job));
-    if (jobs.length === 0) {
+    const scopedJobs = this.agentJobs.listForScope(scopeRef);
+    const summaries = this.agentJobs.listMissionSummariesForScope(scopeRef);
+    if (summaries.length === 0) {
       return messageResponse([
         this.t('coordinator.agent.listTitle', { count: 0 }),
         this.t('coordinator.agent.empty'),
@@ -6024,29 +6112,35 @@ export class BridgeCoordinator {
       ], this.buildScopedSessionMeta(event));
     }
     const lines = [
-      this.t('coordinator.agent.listTitle', { count: jobs.length }),
+      this.t('coordinator.agent.listTitle', { count: summaries.length }),
     ];
-    for (const [index, job] of jobs.entries()) {
+    for (const [index, summary] of summaries.entries()) {
+      const mission = summary.mission;
       lines.push(this.t('coordinator.agent.item', {
         index: index + 1,
-        title: job.title,
+        title: mission.title,
       }));
       lines.push(this.t('coordinator.agent.status', {
-        value: formatAgentStatusLabel(job.status, job.running, this.currentI18n),
+        value: formatAgentStatusLabel(
+          mission.status as AgentJobStatus,
+          isActiveMissionJobStatus(mission.status),
+          this.currentI18n,
+        ),
       }));
       lines.push(this.t('coordinator.agent.attempts', {
-        value: `${job.attemptCount}/${job.maxAttempts}`,
+        value: `${mission.attemptCount}/${mission.maxAttempts}`,
       }));
-      if (job.lastResultPreview) {
-        lines.push(this.t('coordinator.agent.lastResult', { value: job.lastResultPreview }));
+      if (summary.lastResultPreview) {
+        lines.push(this.t('coordinator.agent.lastResult', { value: summary.lastResultPreview }));
         lines.push(this.t('coordinator.agent.resultHint', { index: index + 1 }));
       }
-      const artifacts = this.resolveAgentJobArtifacts(job);
+      const rawJob = scopedJobs.find((candidate) => candidate.id === mission.id);
+      const artifacts = rawJob ? this.resolveAgentJobArtifacts(rawJob) : [];
       if (artifacts.length > 0) {
         lines.push(this.t('coordinator.agent.attachments', { value: formatAgentArtifactSummary(artifacts, this.currentI18n) }));
       }
-      if (job.lastError) {
-        lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+      if (summary.lastError) {
+        lines.push(this.t('coordinator.agent.lastError', { value: summary.lastError }));
       }
     }
     lines.push(this.t('coordinator.agent.actionsHint'));
@@ -6060,40 +6154,97 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const job = createMissionControlledAgentJobView(resolved.job);
-    const workflowLoadResult = loadMissionWorkflowForAgentJob(job);
-    const workflow = workflowLoadResult.workflow;
-    const missionStatusView = createAgentJobStatusView(job, workflow);
+    const detail = this.agentJobs.getMissionDetail(resolved.job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = resolved.job;
+    const missionStatusView = detail.workpadStatus;
+    const loopSnapshot = detail.loopSnapshot;
+    const workflowValue = detail.workflow.status === 'invalid'
+      ? (detail.workflow.error ?? detail.workflow.source.label)
+      : detail.workflow.source.label;
     const lines = [
-      this.t('coordinator.agent.detailTitle', { title: job.title }),
-      this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
+      this.t('coordinator.agent.detailTitle', { title: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(
+          detail.mission.status as AgentJobStatus,
+          isActiveMissionJobStatus(detail.mission.status),
+          this.currentI18n,
+        ),
+      }),
       this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
       this.t('coordinator.agent.category', { value: formatAgentCategory(job.category, this.currentI18n) }),
-      this.t('coordinator.agent.risk', { value: formatAgentRisk(job.riskLevel, this.currentI18n) }),
-      this.t('coordinator.agent.providerProfile', { value: job.providerProfileId }),
-      this.t('coordinator.agent.workingDirectory', { value: job.cwd ?? this.t('common.notSet') }),
+      this.t('coordinator.agent.risk', { value: formatAgentRisk(detail.mission.riskLevel, this.currentI18n) }),
+      this.t('coordinator.agent.providerProfile', { value: detail.mission.providerProfileId }),
+      this.t('coordinator.agent.workingDirectory', { value: detail.mission.cwd ?? this.t('common.notSet') }),
       this.t('coordinator.agent.workflow', {
-        value: workflow
-          ? workflow.source.label
-          : workflowLoadResult.error?.message ?? job.missionWorkflowSourceLabel ?? this.t('common.notSet'),
+        value: workflowValue || this.t('common.notSet'),
       }),
-      this.t('coordinator.agent.goal', { value: job.goal }),
-      this.t('coordinator.agent.expectedOutput', { value: job.expectedOutput }),
+      this.t('coordinator.agent.goal', { value: detail.mission.goal }),
+      this.t('coordinator.agent.expectedOutput', { value: detail.mission.expectedOutput }),
       this.t('coordinator.agent.planTitle'),
-      ...job.plan.map((line, index) => `${index + 1}. ${line}`),
-      this.t('coordinator.agent.attempts', { value: `${job.attemptCount}/${job.maxAttempts}` }),
+      ...detail.mission.plan.map((line, index) => `${index + 1}. ${line}`),
+      this.t('coordinator.agent.attempts', { value: `${detail.mission.attemptCount}/${detail.mission.maxAttempts}` }),
     ];
-    if (missionStatusView.summary) {
+    if (detail.checklistStatus.totalItems > 0) {
+      lines.push(this.t('coordinator.agent.checklistProgress', {
+        completed: detail.checklistStatus.completedItems,
+        total: detail.checklistStatus.totalItems,
+      }));
+    }
+    if (loopSnapshot.currentCycle > 0) {
+      lines.push(this.t('coordinator.agent.loopCycle', {
+        value: String(loopSnapshot.currentCycle),
+      }));
+    }
+    if (loopSnapshot.currentStage) {
+      lines.push(this.t('coordinator.agent.loopStage', {
+        value: loopSnapshot.currentStage,
+      }));
+    }
+    if (loopSnapshot.currentProgress) {
+      lines.push(this.t('coordinator.agent.loopProgress', {
+        value: loopSnapshot.currentProgress,
+      }));
+    }
+    if (typeof loopSnapshot.overallCompletion === 'number') {
+      lines.push(this.t('coordinator.agent.loopCompletion', {
+        value: `${loopSnapshot.overallCompletion}%`,
+      }));
+    }
+    if (loopSnapshot.currentItemTitle) {
+      lines.push(this.t('coordinator.agent.currentChecklistItem', {
+        value: loopSnapshot.currentItemTitle,
+      }));
+    }
+    if (isAgentMissionAwaitingStartStatus(detail.mission.status)) {
+      lines.push(...this.buildAgentStartGateLines(detail, resolved.index ?? job.id));
+    }
+    if (detail.mission.status === 'scope_change_pending') {
+      lines.push(...this.buildAgentPlanChangeLines(detail, resolved.index ?? job.id));
+    }
+    if (loopSnapshot.nextStep) {
+      lines.push(this.t('coordinator.agent.loopNextStep', {
+        value: loopSnapshot.nextStep,
+      }));
+    }
+    if (isAgentMissionPausedStatus(detail.mission.status)) {
+      lines.push(...this.buildAgentPausedStateLines(detail, resolved.index ?? job.id));
+    }
+    if (missionStatusView.summary && missionStatusView.summary !== loopSnapshot.currentProgress) {
       lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
     }
-    if (missionStatusView.latestBlocker) {
-      lines.push(this.t('coordinator.agent.workpadBlocker', { value: missionStatusView.latestBlocker }));
+    if (loopSnapshot.latestBlocker) {
+      lines.push(this.t('coordinator.agent.workpadBlocker', { value: loopSnapshot.latestBlocker }));
     }
-    if (job.verificationSummary) {
-      lines.push(this.t('coordinator.agent.verification', { value: job.verificationSummary }));
+    if (loopSnapshot.latestVerifierSummary) {
+      lines.push(this.t('coordinator.agent.verification', { value: loopSnapshot.latestVerifierSummary }));
     }
-    if (job.lastResultPreview) {
-      lines.push(this.t('coordinator.agent.lastResult', { value: job.lastResultPreview }));
+    if (detail.lastResultPreview) {
+      lines.push(this.t('coordinator.agent.lastResult', { value: detail.lastResultPreview }));
       lines.push(this.t('coordinator.agent.resultHint', { index: resolved.index ?? job.id }));
     }
     const artifacts = this.resolveAgentJobArtifacts(job);
@@ -6101,10 +6252,10 @@ export class BridgeCoordinator {
       lines.push(this.t('coordinator.agent.attachmentsTitle'));
       lines.push(...artifacts.map((artifact, index) => formatAgentArtifactLine(artifact, index, this.currentI18n)));
     }
-    if (job.lastError) {
-      lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+    if (detail.lastError) {
+      lines.push(this.t('coordinator.agent.lastError', { value: detail.lastError }));
     }
-    if (job.missionAttemptHistory.length > 0) {
+    if (detail.attempts.length > 0) {
       lines.push(this.t('coordinator.agent.attemptHistoryTitle'));
       lines.push(...missionStatusView.attemptHistory.map((line) => `- ${line}`));
     }
@@ -6144,7 +6295,7 @@ export class BridgeCoordinator {
         ], this.buildScopedSessionMeta(event));
       }
       const artifact = this.createAgentResultTextArtifact(job, resultText);
-      const existingArtifacts = normalizeAgentArtifacts(job.resultArtifacts ?? null);
+      const existingArtifacts = this.resolveAgentJobArtifacts(rawJob);
       if (!existingArtifacts.some((item) => item.path === artifact.path)) {
         this.agentJobs.updateJob(job.id, {
           resultText,
@@ -6191,8 +6342,9 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const job = createMissionControlledAgentJobView(resolved.job);
-    const artifacts = this.resolveAgentJobArtifacts(job);
+    const rawJob = resolved.job;
+    const job = createMissionControlledAgentJobView(rawJob);
+    const artifacts = this.resolveAgentJobArtifacts(rawJob);
     if (artifacts.length === 0) {
       return messageResponse([
         this.t('coordinator.agent.noAttachments'),
@@ -6829,6 +6981,358 @@ export class BridgeCoordinator {
     this.pendingAgentDraftsByScope.delete(formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId));
   }
 
+  resolveAgentStartConfirmation(event, token = ''): AgentStartConfirmationResolution {
+    const normalized = String(token ?? '').trim();
+    if (normalized) {
+      const resolved = this.resolveAgentJobForScope(event, normalized);
+      if (!resolved) {
+        return {
+          status: 'not_found',
+          value: normalized,
+        };
+      }
+      const detail = this.agentJobs.getMissionDetail(resolved.job.id);
+      if (!detail || !isAgentMissionConfirmableStatus(detail.mission.status)) {
+        return {
+          status: 'none_pending',
+        };
+      }
+      return {
+        status: 'found',
+        job: resolved.job,
+        index: resolved.index ?? 1,
+      };
+    }
+    const scopeRef = toScopeRef(event);
+    const candidates = this.agentJobs
+      .listMissionSummariesForScope(scopeRef)
+      .map((summary, index) => ({
+        summary,
+        index: index + 1,
+        job: this.agentJobs.getById(summary.mission.id),
+      }))
+      .filter((candidate): candidate is { summary: any; index: number; job: AgentJob } =>
+        Boolean(candidate.job) && isAgentMissionConfirmableStatus(candidate.summary.mission.status))
+      .map((candidate) => ({
+        job: candidate.job,
+        index: candidate.index,
+      }));
+    if (candidates.length === 0) {
+      return {
+        status: 'none_pending',
+      };
+    }
+    if (candidates.length === 1) {
+      return {
+        status: 'found',
+        job: candidates[0].job,
+        index: candidates[0].index,
+      };
+    }
+    return {
+      status: 'ambiguous',
+      candidates,
+    };
+  }
+
+  confirmAgentStartMission(
+    event,
+    job: AgentJob,
+    index: number,
+    decision: 'approve' | 'reject' | null = null,
+    responseText = '',
+  ) {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    let updated = job;
+    if (detail.mission.status === 'draft') {
+      updated = this.agentJobs.startJob(job.id);
+    } else if (detail.mission.status === 'awaiting_checklist_confirm') {
+      updated = this.agentJobs.startJob(job.id, {
+        confirmChecklist: true,
+      });
+    } else if (detail.mission.status === 'awaiting_prompt_confirm') {
+      updated = this.agentJobs.startJob(job.id, {
+        confirmPrompt: true,
+      });
+    } else if (detail.mission.status === 'scope_change_pending') {
+      updated = this.agentJobs.resolvePlanChange(job.id, decision === 'reject' ? 'reject' : 'approve');
+      return this.renderAgentMissionPlanChangeResponse(
+        event,
+        updated,
+        index,
+        decision === 'reject' ? 'reject' : 'approve',
+      );
+    } else if (isAgentMissionPausedStatus(detail.mission.status)) {
+      const normalizedResponseText = compactWhitespace(responseText);
+      if (detail.pendingApproval || decision !== null) {
+        updated = this.agentJobs.submitApproval(
+          job.id,
+          decision === 'reject' ? 'reject' : 'approve',
+          {
+            approvalId: detail.pendingApproval?.requestId ?? null,
+            responseText: normalizedResponseText || null,
+          },
+        );
+        return this.renderAgentMissionApprovalResponse(
+          event,
+          updated,
+          index,
+          decision === 'reject' ? 'reject' : 'approve',
+          normalizedResponseText,
+        );
+      }
+      updated = this.agentJobs.resumeJob(
+        job.id,
+        normalizedResponseText
+          ? 'Agent mission queued to continue after host input.'
+          : 'Agent mission queued to continue after host confirmation.',
+        {
+          responseText: normalizedResponseText || null,
+        },
+      );
+      return this.renderAgentMissionResumeResponse(event, updated, index, normalizedResponseText);
+    } else {
+      return messageResponse([
+        this.t('coordinator.agent.noStartConfirmation'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return this.renderAgentMissionStartResponse(event, updated, index, {
+      created: false,
+    });
+  }
+
+  renderAgentMissionStartResponse(event, job: AgentJob, index: number, options: { created: boolean }) {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (detail.mission.status === 'queued') {
+      const response = messageResponse([
+        this.t(options.created ? 'coordinator.agent.createdQueuedAfterConfirm' : 'coordinator.agent.startQueued'),
+        this.t('coordinator.agent.title', { value: detail.mission.title }),
+        this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
+        this.t('coordinator.agent.status', {
+          value: formatAgentStatusLabel(job.status, job.running, this.currentI18n),
+        }),
+        this.t('coordinator.agent.deliveryTarget'),
+        this.t('coordinator.agent.showHint', { index }),
+      ], this.buildScopedSessionMeta(event));
+      response.meta = {
+        ...(response.meta ?? {}),
+        systemAction: {
+          kind: 'run_agent_sweep',
+        },
+      };
+      return response;
+    }
+
+    const lines = [
+      this.t(options.created ? 'coordinator.agent.createdPendingStart' : 'coordinator.agent.startStepConfirmed'),
+      this.t('coordinator.agent.title', { value: detail.mission.title }),
+      this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+      }),
+      ...this.buildAgentStartGateLines(detail, index),
+      this.t('coordinator.agent.showHint', { index }),
+    ];
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  renderAgentMissionResumeResponse(event, job: AgentJob, index: number, responseText = '') {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const normalizedResponseText = compactWhitespace(responseText);
+    const lines = [
+      this.t('coordinator.agent.resumeQueued'),
+      this.t('coordinator.agent.title', { value: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+      }),
+    ];
+    if (normalizedResponseText) {
+      lines.push(this.t('coordinator.agent.responseRecorded', { value: normalizedResponseText }));
+    }
+    lines.push(this.t('coordinator.agent.showHint', { index }));
+    const response = messageResponse(lines, this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
+  renderAgentMissionApprovalResponse(
+    event,
+    job: AgentJob,
+    index: number,
+    decision: 'approve' | 'reject',
+    responseText = '',
+  ) {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const normalizedResponseText = compactWhitespace(responseText);
+    const lines = [
+      decision === 'reject'
+        ? this.t('coordinator.agent.approvalRejectedQueued')
+        : this.t('coordinator.agent.approvalApprovedQueued'),
+      this.t('coordinator.agent.title', { value: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+      }),
+    ];
+    if (normalizedResponseText) {
+      lines.push(this.t('coordinator.agent.responseRecorded', { value: normalizedResponseText }));
+    }
+    lines.push(this.t('coordinator.agent.showHint', { index }));
+    const response = messageResponse(lines, this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
+  renderAgentMissionPlanChangeResponse(event, job: AgentJob, index: number, decision: 'approve' | 'reject') {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (detail.mission.status !== 'queued') {
+      return messageResponse([
+        decision === 'reject'
+          ? this.t('coordinator.agent.planChangeRejectedPending')
+          : this.t('coordinator.agent.planChangeApprovedPending'),
+        this.t('coordinator.agent.title', { value: detail.mission.title }),
+        this.t('coordinator.agent.status', {
+          value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+        }),
+        ...this.buildAgentPlanChangeLines(detail, index),
+        this.t('coordinator.agent.showHint', { index }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const response = messageResponse([
+      decision === 'reject'
+        ? this.t('coordinator.agent.planChangeRejectedQueued')
+        : this.t('coordinator.agent.planChangeApprovedQueued'),
+      this.t('coordinator.agent.title', { value: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+      }),
+      this.t('coordinator.agent.showHint', { index }),
+    ], this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
+  buildAgentStartGateLines(detail, index) {
+    const commandToken = String(index ?? detail.mission.id);
+    if (detail.mission.status === 'awaiting_checklist_confirm') {
+      const lines = [
+        this.t('coordinator.agent.checklistConfirmTitle'),
+        this.t('coordinator.agent.expectedOutput', { value: detail.mission.expectedOutput }),
+      ];
+      if (detail.currentChecklistSnapshot?.acceptanceCriteria?.length) {
+        lines.push(this.t('coordinator.agent.acceptanceCriteriaTitle'));
+        lines.push(...detail.currentChecklistSnapshot.acceptanceCriteria.map((criterion, criterionIndex) => `${criterionIndex + 1}. ${criterion}`));
+      }
+      if (detail.currentChecklistSnapshot?.plan?.length) {
+        lines.push(this.t('coordinator.agent.planTitle'));
+        lines.push(...detail.currentChecklistSnapshot.plan.map((line, planIndex) => `${planIndex + 1}. ${line}`));
+      }
+      lines.push(this.t('coordinator.agent.confirmJobHint', { index: commandToken }));
+      return lines;
+    }
+    if (detail.mission.status === 'awaiting_prompt_confirm') {
+      return [
+        this.t('coordinator.agent.promptConfirmTitle'),
+        detail.mission.immutablePrompt,
+        this.t('coordinator.agent.confirmJobHint', { index: commandToken }),
+      ];
+    }
+    return [];
+  }
+
+  buildAgentPlanChangeLines(detail, index) {
+    const changeRequest = resolveLatestProposedPlanChange(detail);
+    if (!changeRequest) {
+      return [];
+    }
+    const commandToken = String(index ?? detail.mission.id);
+    const lines = [
+      this.t('coordinator.agent.planChangeTitle'),
+      this.t('coordinator.agent.planChangeRationale', {
+        value: changeRequest.rationale,
+      }),
+    ];
+    const proposedExpectedOutput = compactWhitespace(changeRequest.proposedExpectedOutput ?? '');
+    if (proposedExpectedOutput && proposedExpectedOutput !== detail.mission.expectedOutput) {
+      lines.push(this.t('coordinator.agent.planChangeExpectedOutput', {
+        value: proposedExpectedOutput,
+      }));
+    }
+    if (!isSameStringList(changeRequest.proposedAcceptanceCriteria, detail.mission.acceptanceCriteria)) {
+      lines.push(this.t('coordinator.agent.planChangeAcceptanceTitle'));
+      lines.push(...changeRequest.proposedAcceptanceCriteria.map((criterion, criterionIndex) => `${criterionIndex + 1}. ${criterion}`));
+    }
+    if (!isSameStringList(changeRequest.proposedPlan, detail.mission.plan)) {
+      lines.push(this.t('coordinator.agent.planChangePlanTitle'));
+      lines.push(...changeRequest.proposedPlan.map((line, planIndex) => `${planIndex + 1}. ${line}`));
+    }
+    lines.push(this.t('coordinator.agent.planChangeApproveHint', { index: commandToken }));
+    lines.push(this.t('coordinator.agent.planChangeRejectHint', { index: commandToken }));
+    return lines;
+  }
+
+  buildAgentPausedStateLines(detail, index) {
+    if (!isAgentMissionPausedStatus(detail.mission.status)) {
+      return [];
+    }
+    const commandToken = String(index ?? detail.mission.id);
+    const lines = [];
+    if (detail.pendingApproval?.summary) {
+      lines.push(this.t('coordinator.agent.pendingApprovalTitle', {
+        value: detail.pendingApproval.summary,
+      }));
+      lines.push(this.t('coordinator.agent.pendingApprovalApproveHint', { index: commandToken }));
+      lines.push(this.t('coordinator.agent.pendingApprovalRejectHint', { index: commandToken }));
+    }
+    if (detail.latestCycleResult?.needUserAction) {
+      lines.push(this.t('coordinator.agent.userActionRequired', {
+        value: detail.latestCycleResult.needUserAction,
+      }));
+    }
+    lines.push(this.t('coordinator.agent.respondJobHint', { index: commandToken }));
+    lines.push(this.t('coordinator.agent.resumeJobHint', { index: commandToken }));
+    return lines;
+  }
+
   resolveAgentJobForScope(event, token) {
     const scopeRef = toScopeRef(event);
     const job = this.agentJobs.resolveForScope(scopeRef, token);
@@ -6844,10 +7348,19 @@ export class BridgeCoordinator {
   }
 
   resolveAgentJobArtifacts(job: AgentJob): TurnArtifactDeliveredItem[] {
+    const directProjection = normalizeAgentArtifacts(job.resultArtifacts ?? null);
     const effectiveJob = createMissionControlledAgentJobView(job);
+    const missionExecution = this.agentJobs?.getMissionExecution(effectiveJob.id);
+    const projectedArtifacts = normalizeMissionExecutionArtifacts(missionExecution?.artifactRefs ?? null);
+    if (projectedArtifacts.length > 0) {
+      return projectedArtifacts;
+    }
     const direct = normalizeAgentArtifacts(effectiveJob.resultArtifacts ?? null);
     if (direct.length > 0) {
       return direct;
+    }
+    if (directProjection.length > 0) {
+      return directProjection;
     }
     const session = this.agentJobs?.getSession?.(effectiveJob) ?? this.bridgeSessions.getSessionById(effectiveJob.bridgeSessionId);
     const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;
@@ -6856,13 +7369,21 @@ export class BridgeCoordinator {
 
   async resolveAgentJobResultText(job: AgentJob): Promise<string> {
     const effectiveJob = createMissionControlledAgentJobView(job);
-    const stored = stripAgentArtifactProtocol(effectiveJob.resultText ?? '').trim();
-    if (stored && !isAgentResultPreviewOnly(effectiveJob, stored)) {
+    const detail = this.agentJobs?.getMissionDetail(effectiveJob.id);
+    const authoritativeJob = detail
+      ? {
+        ...effectiveJob,
+        lastResultPreview: detail.mission.lastResultPreview ?? effectiveJob.lastResultPreview,
+        resultText: detail.mission.resultText ?? effectiveJob.resultText,
+      }
+      : effectiveJob;
+    const stored = stripAgentArtifactProtocol(authoritativeJob.resultText ?? '').trim();
+    if (stored && !isAgentResultPreviewOnly(authoritativeJob, stored)) {
       return stored;
     }
     const session = this.agentJobs?.getSession?.(effectiveJob) ?? this.bridgeSessions.getSessionById(effectiveJob.bridgeSessionId);
     if (!session) {
-      return stored || String(effectiveJob.lastResultPreview ?? '').trim();
+      return stored || String(authoritativeJob.lastResultPreview ?? '').trim();
     }
     try {
       const thread = await this.bridgeSessions.readProviderThread(
@@ -6871,17 +7392,17 @@ export class BridgeCoordinator {
         { includeTurns: true },
       );
       const recovered = stripAgentArtifactProtocol(extractLastAssistantThreadText(thread));
-      if (recovered && !isAgentResultPreviewOnly(effectiveJob, recovered)) {
+      if (recovered && !isAgentResultPreviewOnly(authoritativeJob, recovered)) {
         return recovered;
       }
     } catch {
       // Keep the command usable even if the provider thread cannot be reopened.
     }
     const rolloutRecovered = stripAgentArtifactProtocol(readCodexRolloutLastAgentMessage(session.codexThreadId));
-    if (rolloutRecovered && !isAgentResultPreviewOnly(effectiveJob, rolloutRecovered)) {
+    if (rolloutRecovered && !isAgentResultPreviewOnly(authoritativeJob, rolloutRecovered)) {
       return rolloutRecovered;
     }
-    return stored || String(effectiveJob.lastResultPreview ?? '').trim();
+    return stored || String(authoritativeJob.lastResultPreview ?? '').trim();
   }
 
   createAgentResultTextArtifact(job: AgentJob, resultText: string): TurnArtifactDeliveredItem {
@@ -10524,6 +11045,7 @@ export class BridgeCoordinator {
         now: this.now,
         onProgress: options.onProgress ?? null,
         onApprovalRequest: options.onApprovalRequest ?? null,
+        onNotification: options.onNotification ?? null,
       });
     } catch (error) {
       const message = formatUserError(error);
@@ -13187,6 +13709,32 @@ function normalizeAgentArtifactsForStorage(artifacts: OutputArtifact[]): TurnArt
   return normalizeAgentArtifacts(artifacts);
 }
 
+function normalizeMissionExecutionArtifacts(value: unknown): TurnArtifactDeliveredItem[] {
+  const items = Array.isArray(value) ? value : [];
+  return items
+    .map((item) => {
+      const pathValue = String(item?.path ?? '').trim();
+      if (!pathValue) {
+        return null;
+      }
+      const kind = normalizeAgentArtifactKind(item?.type);
+      if (!kind) {
+        return null;
+      }
+      return {
+        kind,
+        path: pathValue,
+        displayName: normalizeNullableDisplayString(item?.name),
+        mimeType: normalizeNullableDisplayString(item?.mimeType),
+        sizeBytes: null,
+        caption: normalizeNullableDisplayString(item?.caption),
+        source: 'provider_native' as const,
+        turnId: null,
+      };
+    })
+    .filter(Boolean) as TurnArtifactDeliveredItem[];
+}
+
 function normalizeAgentArtifacts(value: unknown): TurnArtifactDeliveredItem[] {
   const items = Array.isArray(value) ? value : [];
   return items
@@ -13317,6 +13865,108 @@ function formatAgentRisk(value: string, i18n: Translator): string {
     : i18n.t(`coordinator.agent.risk.${value}`);
 }
 
+function isActiveMissionJobStatus(status: string): boolean {
+  return status === 'planning'
+    || status === 'running'
+    || status === 'verifying'
+    || status === 'repairing';
+}
+
+function isAgentMissionAwaitingStartStatus(status: string): boolean {
+  return status === 'awaiting_checklist_confirm'
+    || status === 'awaiting_prompt_confirm';
+}
+
+function isAgentMissionScopeChangePendingStatus(status: string): boolean {
+  return status === 'scope_change_pending';
+}
+
+function isAgentMissionPausedStatus(status: string): boolean {
+  return status === 'waiting_user'
+    || status === 'needs_human'
+    || status === 'handoff'
+    || status === 'blocked';
+}
+
+function isAgentMissionConfirmableStatus(status: string): boolean {
+  return isAgentMissionAwaitingStartStatus(status)
+    || isAgentMissionScopeChangePendingStatus(status)
+    || isAgentMissionPausedStatus(status);
+}
+
+function parseAgentConfirmDirective(value: string): {
+  targetToken: string;
+  decision: 'approve' | 'reject' | null;
+  responseText: string;
+} {
+  const parts = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
+  if (parts.length === 0) {
+    return {
+      targetToken: '',
+      decision: null,
+      responseText: '',
+    };
+  }
+  const first = parts[0]?.toLowerCase() ?? '';
+  if (isAgentRejectDecisionToken(first) || isAgentApproveDecisionToken(first)) {
+    return {
+      targetToken: '',
+      decision: isAgentRejectDecisionToken(first) ? 'reject' : 'approve',
+      responseText: parts.slice(1).join(' ').trim(),
+    };
+  }
+  if (parts.length === 1) {
+    return {
+      targetToken: parts[0] ?? '',
+      decision: null,
+      responseText: '',
+    };
+  }
+  const targetToken = parts.shift() ?? '';
+  let decision: 'approve' | 'reject' | null = null;
+  const next = parts[0]?.toLowerCase() ?? '';
+  if (isAgentRejectDecisionToken(next) || isAgentApproveDecisionToken(next)) {
+    decision = isAgentRejectDecisionToken(next) ? 'reject' : 'approve';
+    parts.shift();
+  }
+  return {
+    targetToken,
+    decision,
+    responseText: parts.join(' ').trim(),
+  };
+}
+
+function isAgentApproveDecisionToken(value: string): boolean {
+  return value === 'approve' || value === 'approved' || value === 'accept' || value === '确认';
+}
+
+function isAgentRejectDecisionToken(value: string): boolean {
+  return value === 'reject'
+    || value === 'rejected'
+    || value === 'decline'
+    || value === 'deny'
+    || value === '拒绝'
+    || value === '驳回'
+    || value === '不同意';
+}
+
+function resolveLatestProposedPlanChange(detail) {
+  if (!Array.isArray(detail?.planChangeRequests)) {
+    return null;
+  }
+  const proposed = detail.planChangeRequests
+    .filter((changeRequest) => changeRequest?.status === 'proposed')
+    .sort((left, right) => left.createdAt - right.createdAt);
+  return proposed[proposed.length - 1] ?? null;
+}
+
+function isSameStringList(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
 function formatAgentStatusLabel(status: string, running: boolean, i18n: Translator): string {
   if (running) {
     return i18n.t('coordinator.agent.status.running');
@@ -13324,6 +13974,19 @@ function formatAgentStatusLabel(status: string, running: boolean, i18n: Translat
   const key = `coordinator.agent.status.${status}`;
   const localized = i18n.t(key);
   return localized === key ? status : localized;
+}
+
+function shouldRenderAgentMissionNotification(
+  cycleResult: MissionHostNotification['cycleResult'],
+  loopSnapshot: MissionHostNotification['loopSnapshot'],
+): loopSnapshot is NonNullable<MissionHostNotification['loopSnapshot']> {
+  if (!cycleResult || !loopSnapshot) {
+    return false;
+  }
+  if (cycleResult.status === 'retry') {
+    return true;
+  }
+  return cycleResult.status === 'continue' && cycleResult.stage.startsWith('verifier.');
 }
 
 function parseAutomationAddSpec(text: string) {
@@ -14642,6 +15305,8 @@ function formatAutomationStatusLabel(status: string, running: boolean, i18n: Tra
 
 function formatMissionRuntimeStatusLabel(status: string, i18n: Translator): string {
   switch (status) {
+    case 'awaiting_checklist_confirm':
+    case 'awaiting_prompt_confirm':
     case 'queued':
     case 'planning':
     case 'running':
@@ -14649,8 +15314,10 @@ function formatMissionRuntimeStatusLabel(status: string, i18n: Translator): stri
     case 'repairing':
     case 'waiting_user':
     case 'needs_human':
+    case 'scope_change_pending':
     case 'handoff':
     case 'blocked':
+    case 'max_loops_reached':
     case 'completed':
     case 'failed':
     case 'stopped':

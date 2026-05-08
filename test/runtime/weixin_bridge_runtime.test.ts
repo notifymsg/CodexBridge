@@ -6,6 +6,7 @@ import { createI18n } from '../../src/i18n/index.js';
 interface RuntimeHarnessOptions {
   coordinator: any;
   automationJobs?: any;
+  agentJobs?: any;
   sendText: (payload: { externalScopeId: string; content: string }) => Promise<any> | any;
   sendMedia?: (payload: { externalScopeId: string; filePath: string; caption?: string | null }) => Promise<any> | any;
   sendTyping?: (payload: { externalScopeId: string; status: 'start' | 'stop' }) => Promise<void> | void;
@@ -22,6 +23,7 @@ interface RuntimeHarnessOptions {
 function makeRuntime({
   coordinator,
   automationJobs = null,
+  agentJobs = null,
   sendText,
   sendMedia,
   sendTyping,
@@ -78,6 +80,7 @@ function makeRuntime({
     },
     bridgeCoordinator: coordinator,
     automationJobs,
+    agentJobs,
     previewSoftTargetBytes,
     previewIntervalMs,
     typingKeepaliveMs,
@@ -748,6 +751,166 @@ test('WeixinBridgeRuntime defers due automation jobs when the scope is busy', as
   assert.equal(deferredCalls.length, 1);
   assert.equal(deferredCalls[0]?.id, 'auto-2');
   assert.equal(typeof deferredCalls[0]?.nextRunAt, 'number');
+});
+
+test('WeixinBridgeRuntime prefers supervision-backed agent scheduling and does not double-dispatch the same mission', async () => {
+  const dispatched: string[] = [];
+  let releaseAgentRun: (() => void) | null = null;
+  const agentRunGate = new Promise<void>((resolve) => {
+    releaseAgentRun = resolve;
+  });
+  const agentJob = {
+    id: 'agent-supervision-1',
+    platform: 'weixin',
+    externalScopeId: 'wxid_agent_supervision',
+    title: 'Resume verifier work',
+    cwd: '/tmp/codexbridge-agent',
+    locale: 'zh-CN',
+  };
+  const runtime = makeRuntime({
+    agentJobs: {
+      recoverSupervisableMissions() {
+        return {
+          recoveredMissionIds: ['agent-supervision-1'],
+          stoppedMissionIds: [],
+        };
+      },
+      claimSupervisableJobs() {
+        return [agentJob];
+      },
+      claimQueuedJobs() {
+        throw new Error('legacy claimQueuedJobs path should not be used');
+      },
+    },
+    sendText: async () => {},
+    coordinator: {
+      async reconcileActiveTurn() {
+        return null;
+      },
+      async runAgentJob(job: any) {
+        dispatched.push(job.id);
+        await agentRunGate;
+        return completeResponse('Mission resumed from supervision.');
+      },
+    },
+  });
+
+  await runtime.runAutomationSweep();
+  await runtime.runAutomationSweep();
+  assert.deepEqual(dispatched, ['agent-supervision-1']);
+
+  releaseAgentRun?.();
+  await runtime.waitForIdle();
+});
+
+test('WeixinBridgeRuntime proactively delivers package-backed agent loop notifications per host policy without duplicating terminal replies', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const job = {
+    id: 'agent-loop-notify-1',
+    platform: 'weixin',
+    externalScopeId: 'wxid_agent_loop_notify',
+    title: 'Loop notification job',
+    cwd: '/tmp/codexbridge-agent',
+    locale: 'zh-CN',
+  };
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async reconcileActiveTurn() {
+        return null;
+      },
+      async runAgentJob(_job: any, options: any = {}) {
+        await options.onNotification?.({
+          missionId: 'agent-loop-notify-1',
+          attemptId: 'attempt-loop-notify-1',
+          status: 'repairing',
+          kind: 'cycle_update',
+          summary: 'Verification requested a repair.',
+          loopSnapshot: {
+            missionId: 'agent-loop-notify-1',
+            status: 'repairing',
+            loopStatus: 'retry',
+            currentCycle: 1,
+            currentStage: 'verifier.repair',
+            currentProgress: 'Verification requested a repair.',
+            currentItemId: 'item-1',
+            currentItemTitle: 'Tests prove the fix',
+            currentItemStatus: 'blocked',
+            checklistVersion: 1,
+            overallCompletion: 50,
+            nextStep: 'Render a repair prompt and retry the mission within budget.',
+            latestBlocker: 'Tests prove the fix',
+            latestVerifierSummary: 'Verification requested a repair.',
+            finalResultSummary: null,
+            pendingApproval: null,
+            stopRequest: null,
+            resumable: true,
+            supervisable: true,
+            lastEventAt: 1_701_000_000_000,
+            updatedAt: 1_701_000_000_000,
+          },
+          cycleResult: {
+            status: 'retry',
+          },
+        });
+        await options.onNotification?.({
+          missionId: 'agent-loop-notify-1',
+          attemptId: 'attempt-loop-notify-2',
+          status: 'completed',
+          kind: 'cycle_update',
+          summary: 'Mission completed.',
+          loopSnapshot: {
+            missionId: 'agent-loop-notify-1',
+            status: 'completed',
+            loopStatus: 'done',
+            currentCycle: 2,
+            currentStage: 'verifier.complete',
+            currentProgress: 'Mission completed.',
+            currentItemId: 'item-1',
+            currentItemTitle: 'Tests prove the fix',
+            currentItemStatus: 'completed',
+            checklistVersion: 1,
+            overallCompletion: 100,
+            nextStep: null,
+            latestBlocker: null,
+            latestVerifierSummary: 'Mission completed.',
+            finalResultSummary: 'Mission completed.',
+            pendingApproval: null,
+            stopRequest: null,
+            resumable: false,
+            supervisable: false,
+            lastEventAt: 1_701_000_000_100,
+            updatedAt: 1_701_000_000_100,
+          },
+          cycleResult: {
+            status: 'done',
+          },
+        });
+        return completeResponse('Mission completed.');
+      },
+      renderAgentMissionNotification(_job: any, notification: any) {
+        if (notification?.cycleResult?.status !== 'retry') {
+          return null;
+        }
+        return 'Agent 任务循环更新。\n当前阶段：verifier.repair';
+      },
+    },
+  });
+
+  await runtime.runAgentJob(job);
+
+  assert.deepEqual(sent, [
+    {
+      externalScopeId: 'wxid_agent_loop_notify',
+      content: 'Agent 任务循环更新。\n当前阶段：verifier.repair',
+    },
+    {
+      externalScopeId: 'wxid_agent_loop_notify',
+      content: 'Mission completed.',
+    },
+  ]);
 });
 
 test('WeixinBridgeRuntime sends artifact-based response messages through platform sendMedia', async () => {

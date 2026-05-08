@@ -1,14 +1,27 @@
 import crypto from 'node:crypto';
-import { shouldMissionRetryReuseAccumulatedContext } from '../../packages/mission-control/src/index.js';
-import { NotFoundError } from './errors.js';
 import {
-  createMissionControlledAgentJobView,
-  createResumedMissionRuntimeStateForAgentJob,
-  createRetriedMissionRuntimeStateForAgentJob,
-  createStoppedMissionRuntimeStateForAgentJob,
+  canTransitionMissionStatus,
+  createManualWorkItemSourceSummary,
+  createWorkItemSourceSummary,
+  DirectMissionControlApi,
+  MissionSupervisor,
+  transitionMission,
+  type Mission,
+  type MissionRepository,
+  type MissionExecutionView,
+  shouldMissionRetryReuseAccumulatedContext,
+  type MissionDetailView,
+  type MissionSummaryView,
+} from '../../packages/mission-control/src/index.js';
+import { NotFoundError } from './errors.js';
+import { AgentJobMissionRepository } from './mission_control_agent_job_repository.js';
+import {
+  createFreshMissionRuntimeStateForAgentJob,
+  createProjectedMissionRuntimeStateForAgentJob,
   loadAgentJobMissionRuntimeState,
-  serializeAgentJobMissionRuntimeState,
 } from './mission_control_agent_job_adapter.js';
+import { persistMissionRuntimeStateToRepository } from './mission_control_agent_job_projection.js';
+import { ProjectingMissionRepository } from './projecting_mission_repository.js';
 import { createI18n, type Translator } from '../i18n/index.js';
 import type {
   AgentJob,
@@ -30,14 +43,24 @@ interface BridgeSessionsLike {
 interface AgentJobServiceOptions {
   agentJobs: AgentJobRepository;
   bridgeSessions?: BridgeSessionsLike | null;
+  missionRepository?: MissionRepository | null;
   now?: () => number;
   locale?: string | null;
+}
+
+export interface AgentJobMissionSupervisionRecoveryResult {
+  recoveredMissionIds: string[];
+  stoppedMissionIds: string[];
 }
 
 export class AgentJobService {
   private readonly agentJobs: AgentJobRepository;
 
   private readonly bridgeSessions: BridgeSessionsLike | null;
+
+  private readonly missionAuthorityRepository: MissionRepository | null;
+
+  private readonly missionControlRepository: MissionRepository;
 
   private readonly now: () => number;
 
@@ -46,13 +69,25 @@ export class AgentJobService {
   constructor({
     agentJobs,
     bridgeSessions = null,
+    missionRepository = null,
     now = () => Date.now(),
     locale = null,
   }: AgentJobServiceOptions) {
     this.agentJobs = agentJobs;
     this.bridgeSessions = bridgeSessions;
+    this.missionAuthorityRepository = missionRepository;
     this.now = now;
     this.i18n = createI18n(locale);
+    this.missionControlRepository = missionRepository
+      ? new ProjectingMissionRepository(missionRepository, agentJobs)
+      : new AgentJobMissionRepository({
+        listJobs: () => this.agentJobs.list(),
+        getJobById: (id) => this.agentJobs.getById(id),
+        updateJob: (id, updates) => this.updateJob(id, updates),
+        resolveSession: (job) => this.getSession(job),
+      }, {
+        now: this.now,
+      });
   }
 
   listForScope(scopeRef: PlatformScopeRef): AgentJob[] {
@@ -66,6 +101,39 @@ export class AgentJobService {
     return this.agentJobs
       .list()
       .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  listMissionSummariesForScope(scopeRef: PlatformScopeRef): MissionSummaryView[] {
+    this.ensureMissionRecordsForJobs(this.listForScope(scopeRef));
+    return this.createMissionControlApi().queries.listMissionSummaries({
+      meta: this.createMissionControlMeta(`agent-list:${scopeRef.platform}:${scopeRef.externalScopeId}`),
+      input: {
+        filter: {
+          platform: scopeRef.platform,
+          externalScopeId: scopeRef.externalScopeId,
+        },
+      },
+    }).data;
+  }
+
+  getMissionDetail(id: string): MissionDetailView | null {
+    this.ensureMissionRecord(id);
+    return this.createMissionControlApi().queries.getMissionDetail({
+      meta: this.createMissionControlMeta(`agent-detail:${id}`),
+      input: {
+        missionId: id,
+      },
+    }).data;
+  }
+
+  getMissionExecution(id: string): MissionExecutionView | null {
+    this.ensureMissionRecord(id);
+    return this.createMissionControlApi().queries.getMissionExecution({
+      meta: this.createMissionControlMeta(`agent-execution:${id}`),
+      input: {
+        missionId: id,
+      },
+    }).data;
   }
 
   getById(id: string): AgentJob | null {
@@ -152,7 +220,54 @@ export class AgentJobService {
       updatedAt: now,
     };
     this.agentJobs.save(job);
-    return job;
+    this.seedMissionFromManualWorkItem(job);
+    return this.requireById(job.id);
+  }
+
+  startJob(id: string, params: {
+    confirmChecklist?: boolean | null;
+    confirmPrompt?: boolean | null;
+  } = {}): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.startMission({
+      meta: this.createMissionControlMeta(`agent-start:${id}`),
+      input: {
+        missionId: id,
+        confirmChecklist: params.confirmChecklist ?? null,
+        confirmPrompt: params.confirmPrompt ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+    return this.requireById(id);
+  }
+
+  proposePlanChange(id: string, params: {
+    rationale: string;
+    proposedExpectedOutput?: string | null;
+    proposedAcceptanceCriteria?: string[] | null;
+    proposedPlan?: string[] | null;
+  }): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.proposePlanChange({
+      meta: this.createMissionControlMeta(`agent-plan-change-propose:${id}`),
+      input: {
+        missionId: id,
+        rationale: params.rationale,
+        proposedExpectedOutput: params.proposedExpectedOutput ?? null,
+        proposedAcceptanceCriteria: params.proposedAcceptanceCriteria ?? null,
+        proposedPlan: params.proposedPlan ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+    return this.requireById(id);
   }
 
   updateJob(id: string, updates: Partial<AgentJob>): AgentJob {
@@ -171,85 +286,162 @@ export class AgentJobService {
   }
 
   renameJob(id: string, title: string): AgentJob {
-    return this.updateJob(id, {
+    const renamed = this.updateJob(id, {
       title: normalizeTitle(title, 'Agent'),
     });
+    if (!this.syncMissionSourceProjection(renamed)) {
+      this.syncMissionTitleProjection(renamed);
+    }
+    return this.requireById(id);
   }
 
   requestStop(id: string): AgentJob {
-    const current = this.requireById(id);
-    const effectiveJob = createMissionControlledAgentJobView(current);
-    const stoppedState = createStoppedMissionRuntimeStateForAgentJob(current, {
-      reason: 'Agent job stop requested.',
-      now: this.now(),
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.stopMission({
+      meta: this.createMissionControlMeta(`agent-stop:${id}`),
+      input: {
+        missionId: id,
+        reason: 'Agent job stop requested.',
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
     });
-    return this.updateJob(id, {
-      stopRequested: true,
-      running: false,
-      status: effectiveJob.status === 'completed' || effectiveJob.status === 'failed'
-        ? effectiveJob.status
-        : 'stopped',
-      missionRuntimeState: stoppedState ? serializeAgentJobMissionRuntimeState(stoppedState) : current.missionRuntimeState,
+    return this.requireById(id);
+  }
+
+  resumeJob(
+    id: string,
+    reason = 'Agent mission queued to continue after host confirmation.',
+    options: {
+      responseText?: string | null;
+    } = {},
+  ): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.resumeMission({
+      meta: this.createMissionControlMeta(`agent-resume:${id}`),
+      input: {
+        missionId: id,
+        reason,
+        responseText: options.responseText ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
     });
+    return this.requireById(id);
+  }
+
+  submitApproval(
+    id: string,
+    decision: 'approve' | 'reject',
+    options: {
+      approvalId?: string | null;
+      reason?: string | null;
+      responseText?: string | null;
+    } = {},
+  ): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.submitApproval({
+      meta: this.createMissionControlMeta(`agent-approval:${id}`),
+      input: {
+        missionId: id,
+        approvalId: options.approvalId ?? null,
+        decision,
+        reason: options.reason ?? null,
+        responseText: options.responseText ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+    return this.requireById(id);
+  }
+
+  resolvePlanChange(
+    id: string,
+    decision: 'approve' | 'reject',
+    reason = decision === 'reject'
+      ? 'Agent mission scope change rejected by the host.'
+      : 'Agent mission scope change approved by the host.',
+  ): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.resolvePlanChange({
+      meta: this.createMissionControlMeta(`agent-plan-change-resolve:${id}`),
+      input: {
+        missionId: id,
+        decision,
+        reason,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+    return this.requireById(id);
   }
 
   retryJob(id: string): AgentJob {
     const current = this.requireById(id);
-    const effectiveJob = createMissionControlledAgentJobView(current);
-    const runtimeState = loadAgentJobMissionRuntimeState(current);
-    if (runtimeState.mission && shouldMissionRetryReuseAccumulatedContext(runtimeState.mission)) {
-      const mission = runtimeState.mission;
-      const resumedState = createResumedMissionRuntimeStateForAgentJob(current, {
-        reason: 'Agent mission queued to continue after human input.',
-        now: this.now(),
-      });
-      if (resumedState) {
-        return this.updateJob(id, {
-          status: 'queued',
-          running: false,
-          stopRequested: false,
-          attemptCount: mission.attemptCount,
-          lastRunAt: mission.lastRunAt,
-          completedAt: null,
-          lastResultPreview: mission.lastResultPreview,
-          resultText: mission.resultText,
-          resultArtifacts: effectiveJob.resultArtifacts ?? null,
-          lastError: null,
-          verificationSummary: null,
-          missionWorkpadLatestBlocker: null,
-          missionWorkpadLatestVerifierSummary: null,
-          missionWorkpadFinalResultSummary: mission.workpad.finalResultSummary,
-          missionAttemptHistory: effectiveJob.missionAttemptHistory,
-          missionRuntimeState: serializeAgentJobMissionRuntimeState(resumedState),
-        });
-      }
+    this.ensureMissionRecord(id);
+    const api = this.createMissionControlApi();
+    const detail = api.queries.getMissionDetail({
+      meta: this.createMissionControlMeta(`agent-detail:${id}`),
+      input: {
+        missionId: id,
+      },
+    }).data;
+    if (detail?.mission && shouldMissionRetryReuseAccumulatedContext(detail.mission)) {
+      return this.resumeJob(id, 'Agent mission queued to continue after human input.');
     }
-    const resetState = createRetriedMissionRuntimeStateForAgentJob(current, {
-      now: this.now(),
-      codexThreadId: this.getSession(current)?.codexThreadId ?? null,
+    api.commands.retryMission({
+      meta: this.createMissionControlMeta(`agent-retry:${id}`),
+      input: {
+        missionId: id,
+        reason: 'Agent mission re-queued through Mission Control retry.',
+        codexThreadId: this.getSession(current)?.codexThreadId ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
     });
-    return this.updateJob(id, {
-      status: 'queued',
-      running: false,
-      stopRequested: false,
-      attemptCount: 0,
-      lastRunAt: null,
-      completedAt: null,
-      lastResultPreview: null,
-      lastError: null,
-      resultText: null,
-      resultArtifacts: null,
-      verificationSummary: null,
-      missionWorkpadLatestBlocker: null,
-      missionWorkpadLatestVerifierSummary: null,
-      missionWorkpadFinalResultSummary: null,
-      missionAttemptHistory: [],
-      missionRuntimeState: serializeAgentJobMissionRuntimeState(resetState),
-    });
+    return this.requireById(id);
   }
 
   deleteJob(id: string): void {
     this.agentJobs.delete(id);
+  }
+
+  recoverSupervisableMissions(): AgentJobMissionSupervisionRecoveryResult {
+    this.ensureMissionRecordsForJobs(this.agentJobs.list());
+    const supervisor = this.createMissionSupervisor();
+    const now = this.now();
+    return {
+      recoveredMissionIds: supervisor.recoverStaleMissions(now).map((mission) => mission.id),
+      stoppedMissionIds: supervisor.reconcileStopRequestedMissions('agent-job-service', now)
+        .map((mission) => mission.id),
+    };
+  }
+
+  claimSupervisableJobs(platform: string, limit = 2): AgentJob[] {
+    if (limit <= 0) {
+      return [];
+    }
+    this.recoverSupervisableMissions();
+    return this.createMissionSupervisor()
+      .listSupervisableMissionIds({ now: this.now() })
+      .map((missionId) => this.agentJobs.getById(missionId))
+      .filter((job): job is AgentJob => Boolean(job) && job.platform === platform)
+      .slice(0, limit)
+      .map((job) => this.requireById(job.id));
   }
 
   resetRunningJobs(): void {
@@ -258,16 +450,26 @@ export class AgentJobService {
       if (!job.running) {
         continue;
       }
+      this.ensureMissionRecord(job.id);
       this.agentJobs.save({
         ...job,
         running: false,
         status: job.stopRequested ? 'stopped' : 'queued',
         updatedAt: now,
       });
+      this.reconcileAuthoritativeMissionFromProjection(job.id, {
+        status: job.stopRequested ? 'stopped' : 'queued',
+        reason: job.stopRequested
+          ? 'Host reset an interrupted agent mission into stopped state.'
+          : 'Host reset an interrupted agent mission into the queue.',
+      });
     }
   }
 
   claimQueuedJobs(platform: string, limit = 2): AgentJob[] {
+    if (this.missionAuthorityRepository) {
+      return this.claimSupervisableJobs(platform, limit);
+    }
     const now = this.now();
     const jobs = this.agentJobs
       .list()
@@ -275,11 +477,16 @@ export class AgentJobService {
       .sort((left, right) => left.createdAt - right.createdAt)
       .slice(0, limit);
     for (const job of jobs) {
+      this.ensureMissionRecord(job.id);
       this.agentJobs.save({
         ...job,
         status: 'planning',
         running: true,
         updatedAt: now,
+      });
+      this.reconcileAuthoritativeMissionFromProjection(job.id, {
+        status: 'planning',
+        reason: 'Host claimed a queued mission for execution.',
       });
     }
     return jobs.map((job) => this.requireById(job.id));
@@ -412,6 +619,205 @@ export class AgentJobService {
   getSession(job: AgentJob): BridgeSession | null {
     return this.bridgeSessions?.getSessionById?.(job.bridgeSessionId) ?? null;
   }
+
+  getMissionRepository(): MissionRepository {
+    return this.missionControlRepository;
+  }
+
+  ensureMissionRecord(id: string): Mission | null {
+    const job = this.agentJobs.getById(id);
+    if (!job) {
+      return null;
+    }
+    const jobState = loadAgentJobMissionRuntimeState(job);
+    if (!this.missionAuthorityRepository) {
+      return this.missionControlRepository.getMissionById(id);
+    }
+    const existing = this.missionAuthorityRepository.getMissionById(id);
+    if (existing) {
+      if (jobState.mission && jobState.mission.updatedAt > existing.updatedAt) {
+        persistMissionRuntimeStateToRepository(this.missionControlRepository, jobState);
+        return this.missionControlRepository.getMissionById(id);
+      }
+      return existing;
+    }
+    const seededState = jobState.mission
+      ? jobState
+      : hasLegacyMissionProjection(job)
+        ? createProjectedMissionRuntimeStateForAgentJob(job, {
+          now: this.now(),
+          codexThreadId: this.getSession(job)?.codexThreadId ?? null,
+        })
+        : createFreshMissionRuntimeStateForAgentJob(job, {
+          now: this.now(),
+          codexThreadId: this.getSession(job)?.codexThreadId ?? null,
+        });
+    persistMissionRuntimeStateToRepository(this.missionControlRepository, seededState);
+    return this.missionControlRepository.getMissionById(id);
+  }
+
+  private createMissionControlApi(): DirectMissionControlApi {
+    return new DirectMissionControlApi({
+      repository: this.missionControlRepository,
+      now: this.now,
+    });
+  }
+
+  private createMissionSupervisor(): MissionSupervisor {
+    return new MissionSupervisor({
+      repository: this.missionControlRepository,
+      runtime: null,
+      now: this.now,
+    });
+  }
+
+  private ensureMissionRecordsForJobs(jobs: AgentJob[]): void {
+    if (!this.missionAuthorityRepository) {
+      return;
+    }
+    for (const job of jobs) {
+      this.ensureMissionRecord(job.id);
+    }
+  }
+
+  private seedMissionFromManualWorkItem(job: AgentJob): void {
+    this.createMissionControlApi().commands.createMission({
+      meta: this.createMissionControlMeta(`agent-create:${job.id}`),
+      input: {
+        missionId: job.id,
+        workItem: createManualWorkItemSourceSummary({
+          source: 'manual',
+          sourceRef: job.id,
+          title: job.title,
+          goal: job.goal,
+          expectedOutput: job.expectedOutput,
+          acceptanceCriteria: job.expectedOutput ? [job.expectedOutput] : [],
+          plan: [...job.plan],
+          metadata: {
+            category: job.category,
+            mode: job.mode,
+            originalInput: job.originalInput,
+          },
+        }),
+        platform: job.platform,
+        externalScopeId: job.externalScopeId,
+        providerProfileId: job.providerProfileId,
+        riskLevel: job.riskLevel,
+        cwd: job.cwd,
+        workflowPath: job.missionWorkflowPath,
+        bridgeSessionId: job.bridgeSessionId,
+        codexThreadId: this.getSession(job)?.codexThreadId ?? null,
+        maxAttempts: job.maxAttempts,
+        maxTurns: 8,
+        initialStatus: 'draft',
+        reason: 'Agent mission drafted through the bridge adapter.',
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+  }
+
+  private reconcileAuthoritativeMissionFromProjection(
+    jobId: string,
+    params: {
+      status: 'queued' | 'planning' | 'stopped';
+      reason: string;
+    },
+  ): void {
+    if (!this.missionAuthorityRepository) {
+      return;
+    }
+    const mission = this.ensureMissionRecord(jobId);
+    if (!mission || !canTransitionMissionStatus(mission.status, params.status)) {
+      return;
+    }
+    this.missionControlRepository.saveMission(transitionMission(mission, params.status, {
+      at: this.now(),
+      reason: params.reason,
+      lastError: params.status === 'stopped'
+        ? mission.lastError ?? params.reason
+        : null,
+    }));
+  }
+
+  private syncMissionTitleProjection(job: AgentJob): void {
+    if (!this.missionAuthorityRepository) {
+      return;
+    }
+    const mission = this.ensureMissionRecord(job.id);
+    if (!mission || mission.title === job.title) {
+      return;
+    }
+    this.missionControlRepository.saveMission({
+      ...mission,
+      title: job.title,
+      updatedAt: this.now(),
+    });
+    const workItem = this.missionControlRepository.getWorkItemById(mission.workItemId);
+    if (!workItem || workItem.title === job.title) {
+      return;
+    }
+    this.missionControlRepository.saveWorkItem({
+      ...workItem,
+      title: job.title,
+      updatedAt: this.now(),
+    });
+  }
+
+  private syncMissionSourceProjection(job: AgentJob): boolean {
+    if (!this.missionAuthorityRepository) {
+      return false;
+    }
+    const detail = this.getMissionDetail(job.id);
+    if (
+      !detail?.workItem
+      || !detail.currentChecklistSnapshot
+      || detail.attempts.length > 0
+      || detail.planChangeRequests.length > 0
+      || detail.mission.activeAttemptId
+      || detail.mission.stopRequest
+      || (detail.mission.status !== 'draft' && detail.mission.status !== 'queued')
+    ) {
+      return false;
+    }
+    try {
+      this.createMissionControlApi().commands.syncMissionSource({
+        meta: this.createMissionControlMeta(`agent-sync-source:${job.id}`),
+        input: {
+          missionId: job.id,
+          workItem: createWorkItemSourceSummary({
+            source: detail.workItem.source,
+            sourceRef: detail.workItem.sourceRef ?? detail.mission.sourceRef ?? job.id,
+            sourceRevision: detail.workItem.sourceRevision,
+            title: job.title,
+            goal: detail.mission.goal,
+            expectedOutput: detail.currentChecklistSnapshot.expectedOutput ?? detail.mission.expectedOutput,
+            acceptanceCriteria: detail.currentChecklistSnapshot.acceptanceCriteria,
+            plan: detail.currentChecklistSnapshot.plan,
+            metadata: detail.workItem.metadata,
+          }),
+          reason: 'Agent mission source synced after host rename.',
+          actor: {
+            actorId: 'agent-job-service',
+            actorType: 'host',
+          },
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private createMissionControlMeta(requestId: string) {
+    return {
+      requestId,
+      correlationId: null,
+      idempotencyKey: null,
+    };
+  }
 }
 
 function normalizeResultArtifacts(value: TurnArtifactDeliveredItem[] | null | undefined): TurnArtifactDeliveredItem[] | null {
@@ -439,6 +845,23 @@ function normalizeResultArtifacts(value: TurnArtifactDeliveredItem[] | null | un
     })
     .filter(Boolean) as TurnArtifactDeliveredItem[];
   return normalized.length > 0 ? normalized : null;
+}
+
+function hasLegacyMissionProjection(job: AgentJob): boolean {
+  return job.attemptCount > 0
+    || job.missionAttemptHistory.length > 0
+    || Boolean(job.lastRunAt)
+    || Boolean(job.completedAt)
+    || Boolean(job.lastResultPreview)
+    || Boolean(job.resultText)
+    || Boolean(job.resultArtifacts?.length)
+    || Boolean(job.lastError)
+    || Boolean(job.verificationSummary)
+    || Boolean(job.missionWorkflowPath)
+    || Boolean(job.missionWorkpadLatestBlocker)
+    || Boolean(job.missionWorkpadLatestVerifierSummary)
+    || Boolean(job.missionWorkpadFinalResultSummary)
+    || job.status !== 'queued';
 }
 
 function normalizeArtifactKind(value: unknown): TurnArtifactDeliveredItem['kind'] | null {
@@ -514,15 +937,19 @@ function appendAttemptHistoryEntry(
 function normalizeAgentJobStatus(value: unknown): AgentJobStatus {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (
-    normalized === 'queued'
+    normalized === 'awaiting_checklist_confirm'
+    || normalized === 'awaiting_prompt_confirm'
+    || normalized === 'queued'
     || normalized === 'planning'
     || normalized === 'running'
     || normalized === 'verifying'
     || normalized === 'repairing'
     || normalized === 'waiting_user'
     || normalized === 'needs_human'
+    || normalized === 'scope_change_pending'
     || normalized === 'handoff'
     || normalized === 'blocked'
+    || normalized === 'max_loops_reached'
     || normalized === 'completed'
     || normalized === 'failed'
     || normalized === 'stopped'

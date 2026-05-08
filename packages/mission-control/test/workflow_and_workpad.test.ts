@@ -6,8 +6,10 @@ import test from 'node:test';
 import {
   MissionWorkflowError,
   MissionWorkflowLoader,
+  MissionWorkflowResolver,
   createMission,
   createMissionAttemptPromptContract,
+  createMissionChecklistSnapshot,
   createMissionWorkpadStatusView,
   renderMissionAttemptPromptContract,
   renderMissionWorkpadStatusView,
@@ -92,6 +94,73 @@ Broken workflow.
   assert.ok(result.error?.issues.some((issue) => issue.includes('version') || issue.includes('maxTurns')));
 });
 
+test('workflow resolver stays deterministic across explicit overrides, source/risk rules, and built-in fallback', () => {
+  const resolver = new MissionWorkflowResolver({
+    rules: [
+      {
+        id: 'local-todo-high-risk',
+        relativePath: '.codexbridge/mission/HIGH_RISK_WORKFLOW.md',
+        sources: ['local-todo'],
+        riskLevels: ['high'],
+        requireWorkspacePath: true,
+      },
+    ],
+  });
+
+  const explicit = resolver.resolve({
+    source: 'manual',
+    riskLevel: 'medium',
+    cwd: '/repo',
+    workspacePath: null,
+    workflowPath: './ops/WORKFLOW.md',
+    workflowResolverReason: 'explicit_override',
+  });
+  assert.deepEqual(explicit, {
+    explicitPath: path.resolve('/repo', './ops/WORKFLOW.md'),
+    workflowPath: path.resolve('/repo', './ops/WORKFLOW.md'),
+    resolverReason: 'explicit_override',
+    matchedRuleId: null,
+  });
+
+  const ruleDriven = resolver.resolve({
+    source: 'local-todo',
+    riskLevel: 'high',
+    cwd: '/repo',
+    workspacePath: '/workspace/mission-high-risk',
+    workflowPath: null,
+    workflowResolverReason: null,
+  });
+  assert.deepEqual(ruleDriven, {
+    explicitPath: path.resolve('/workspace/mission-high-risk', '.codexbridge/mission/HIGH_RISK_WORKFLOW.md'),
+    workflowPath: path.resolve('/workspace/mission-high-risk', '.codexbridge/mission/HIGH_RISK_WORKFLOW.md'),
+    resolverReason: 'rule:local-todo-high-risk',
+    matchedRuleId: 'local-todo-high-risk',
+  });
+  assert.deepEqual(ruleDriven, resolver.resolve({
+    source: 'local-todo',
+    riskLevel: 'high',
+    cwd: '/repo',
+    workspacePath: '/workspace/mission-high-risk',
+    workflowPath: null,
+    workflowResolverReason: null,
+  }));
+
+  const builtIn = resolver.resolve({
+    source: 'manual',
+    riskLevel: 'low',
+    cwd: null,
+    workspacePath: null,
+    workflowPath: null,
+    workflowResolverReason: null,
+  });
+  assert.deepEqual(builtIn, {
+    explicitPath: null,
+    workflowPath: null,
+    resolverReason: 'built_in_default',
+    matchedRuleId: null,
+  });
+});
+
 test('attempt prompt contract keeps workflow policy and runtime state separated', () => {
   const loader = new MissionWorkflowLoader();
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-prompt-contract-'));
@@ -145,19 +214,28 @@ Prefer small, verifiable changes and report blockers explicitly.
   mission.workpad.latestBlocker = 'Need to verify the candidate fix.';
   mission.workpad.notes.push('Attempt 2 should re-run the preview flow after patching.');
   const workflow = loader.load({ workspacePath });
+  const checklistSnapshot = createMissionChecklistSnapshot(mission, {
+    at: mission.updatedAt,
+    generationId: mission.activeGenerationId,
+  });
 
   const contract = createMissionAttemptPromptContract({
     mission,
     attempt,
     workflow,
+    checklistSnapshot,
   });
   const rendered = renderMissionAttemptPromptContract(contract);
 
   assert.equal(contract.workflowSourceLabel, workflowPath);
+  assert.equal(contract.checklistVersion, checklistSnapshot.version);
+  assert.equal(contract.activeChecklistItem?.title, 'Preview no longer freezes');
   assert.deepEqual(contract.finalReportSections, ['summary', 'verification', 'artifacts']);
   assert.ok(contract.stopConditions.includes('Ask for approval before modifying secrets.'));
   assert.match(rendered, /Workflow source:/);
   assert.match(rendered, /Acceptance criteria/);
+  assert.match(rendered, /Checklist focus/);
+  assert.match(rendered, /Current checklist item: \[acceptance\] Preview no longer freezes/);
   assert.match(rendered, /Current workpad context/);
   assert.match(rendered, /Final report contract/);
   assert.match(rendered, /Workflow instructions/);

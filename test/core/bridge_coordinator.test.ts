@@ -11,6 +11,11 @@ import {
   REVIEW_COMMAND_SKILL_ACTIONS,
   THREAD_COMMAND_SKILL_ACTIONS,
 } from '../../src/core/bridge_coordinator.js';
+import {
+  createMissionChecklistSnapshot,
+  createMissionCycleResult,
+  transitionMission,
+} from '../../packages/mission-control/src/index.js';
 import { createCodexBridgeRuntime } from '../../src/runtime/bootstrap.js';
 
 function normalizeCommandSkillInput(value: unknown) {
@@ -749,6 +754,34 @@ async function waitForCondition(predicate, { timeoutMs = 1000, intervalMs = 10 }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   throw new Error('Timed out waiting for condition');
+}
+
+async function fullyConfirmLatestAgentJob(runtime, externalScopeId: string) {
+  const created = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId,
+    text: '/agent confirm',
+  });
+  const index = runtime.services.agentJobs.listForScope({
+    platform: 'weixin',
+    externalScopeId,
+  }).length;
+  const checklist = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId,
+    text: `/agent confirm ${index}`,
+  });
+  const queued = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId,
+    text: `/agent confirm ${index}`,
+  });
+  return {
+    created,
+    checklist,
+    queued,
+    index,
+  };
 }
 
 test('bridge coordinator creates a default-provider session for normal text and starts a turn', async () => {
@@ -6869,12 +6902,29 @@ test('/agent drafts, confirms, runs, verifies, and records a background job', as
     assert.match(draftText, /Agent 草案/);
     assert.match(draftText, /确认：\/agent confirm/);
 
-    const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    const created = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
       externalScopeId: 'wx-agent-1',
       text: '/agent confirm',
     });
-    assert.match(confirmed.messages.map((message) => message.text).join('\n'), /Agent 任务已创建并排队/);
+    assert.match(created.messages.map((message) => message.text).join('\n'), /等待启动确认/);
+    assert.match(created.messages.map((message) => message.text).join('\n'), /初版 checklist/);
+    assert.equal(created.meta?.systemAction, undefined);
+
+    const checklistConfirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+      text: '/agent confirm 1',
+    });
+    assert.match(checklistConfirmed.messages.map((message) => message.text).join('\n'), /immutable prompt/);
+    assert.equal(checklistConfirmed.meta?.systemAction, undefined);
+
+    const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+      text: '/agent confirm 1',
+    });
+    assert.match(confirmed.messages.map((message) => message.text).join('\n'), /Agent 任务已.*排队/);
     assert.equal(confirmed.meta?.systemAction?.kind, 'run_agent_sweep');
 
     const [job] = runtime.services.agentJobs.listForScope({
@@ -7127,11 +7177,7 @@ test('/agent natural language list query uses the command skill instead of creat
       externalScopeId: 'wx-agent-natural-list-1',
       text: '/agent 写一份项目总结',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-natural-list-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-natural-list-1');
 
     const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7283,11 +7329,7 @@ test('/agent natural language proposes and confirms existing job management oper
       externalScopeId: 'wx-agent-natural-manage-1',
       text: '/agent 写一份项目总结',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-natural-manage-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-natural-manage-1');
 
     const updateDraft = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7443,11 +7485,7 @@ test('/agent natural language rejects malformed update patch enums instead of si
       externalScopeId: 'wx-agent-invalid-update-1',
       text: '/agent 写一份项目总结',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-invalid-update-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-invalid-update-1');
 
     const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7556,11 +7594,7 @@ test('/agent natural language can show, export, and resend existing job outputs'
       externalScopeId: 'wx-agent-natural-output-1',
       text: '/agent 生成报告',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-natural-output-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-natural-output-1');
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
       externalScopeId: 'wx-agent-natural-output-1',
@@ -7658,11 +7692,7 @@ test('/agent stores generated attachments and can resend them', async () => {
       externalScopeId: 'wx-agent-artifacts-1',
       text: '/agent 生成一份 Word 报告发给我',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-artifacts-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-artifacts-1');
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
       externalScopeId: 'wx-agent-artifacts-1',
@@ -7731,11 +7761,7 @@ test('/agent show, retry, rename, stop, and delete manage queued jobs', async ()
       externalScopeId: 'wx-agent-2',
       text: '/agent 写一份项目总结',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-2',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-2');
     const show = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
       externalScopeId: 'wx-agent-2',
@@ -7791,11 +7817,7 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
       externalScopeId: 'wx-agent-mission-state-1',
       text: '/agent 汇总当前修复进展并给出最终结论',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-mission-state-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-mission-state-1');
 
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
@@ -7805,6 +7827,8 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     const session = runtime.services.bridgeSessions.getSessionById(job.bridgeSessionId);
     const missionUpdatedAt = Date.now();
     const attemptId = `${job.id}-mission-attempt-1`;
+    const runtimeArtifactPath = path.join(os.tmpdir(), `${job.id}-mission-runtime-report.md`);
+    fs.writeFileSync(runtimeArtifactPath, '# Mission Control report\n');
     const completedState = {
       mission: {
         id: job.id,
@@ -7836,7 +7860,13 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
         stoppedAt: null,
         lastResultPreview: 'Mission Control 已完成结果。',
         resultText: 'Mission Control 已完成结果。\n\n验证通过，所有验收项已满足。',
-        resultArtifacts: [],
+        resultArtifacts: [{
+          type: 'file',
+          path: runtimeArtifactPath,
+          name: 'mission-runtime-report.md',
+          mimeType: 'text/markdown',
+          caption: 'Mission Control report',
+        }],
         lastError: null,
         statusReason: '修复已通过验证。',
         pendingApproval: null,
@@ -7883,7 +7913,16 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
       completedAt: null,
       lastResultPreview: 'stale preview',
       resultText: 'stale wrong result',
-      resultArtifacts: null,
+      resultArtifacts: [{
+        kind: 'file',
+        path: '/tmp/stale-artifact.txt',
+        displayName: 'stale-artifact.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 12,
+        caption: 'stale artifact',
+        source: 'provider_native',
+        turnId: null,
+      }],
       lastError: 'stale error',
       verificationSummary: 'stale verification',
       missionWorkpadLatestBlocker: 'stale blocker',
@@ -7911,6 +7950,8 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     const showCompletedText = showCompleted.messages.map((message) => message.text).join('\n');
     assert.match(showCompletedText, /Mission Control 最终摘要。/);
     assert.match(showCompletedText, /修复已通过验证。/);
+    assert.match(showCompletedText, /mission-runtime-report\.md/);
+    assert.doesNotMatch(showCompletedText, /stale-artifact\.txt/);
     assert.doesNotMatch(showCompletedText, /stale verification/);
 
     const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -7938,12 +7979,148 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     (waitingUserState.attempts[0] as Record<string, unknown>).status = 'waiting_user';
     (waitingUserState.attempts[0] as Record<string, unknown>).endedAt = null;
     (waitingUserState.attempts[0] as Record<string, unknown>).updatedAt = missionUpdatedAt + 1;
+    const waitingChecklistSnapshot = createMissionChecklistSnapshot(waitingUserState.mission as any, {
+      at: missionUpdatedAt + 1,
+    });
+    (waitingUserState as Record<string, unknown>).checklistSnapshots = [waitingChecklistSnapshot];
+    (waitingUserState as Record<string, unknown>).events = [{
+      id: `${job.id}-waiting-user-event-1`,
+      missionId: job.id,
+      attemptId,
+      generationId: waitingChecklistSnapshot.generationId,
+      generationIndex: 1,
+      kind: 'mission.waiting_user',
+      summary: '等待用户确认发布窗口。',
+      detail: null,
+      metadata: {
+        cycleResult: createMissionCycleResult({
+          mission: waitingUserState.mission as any,
+          attempt: waitingUserState.attempts[0] as any,
+          checklistSnapshot: waitingChecklistSnapshot,
+          cycle: 2,
+          status: 'waiting_user',
+          stage: 'verifier.waiting_user',
+          progress: '等待用户确认发布窗口。',
+          nextStep: '等待用户提供发布时间窗口后再继续。',
+          verifierSummary: '等待用户确认发布窗口。',
+          blocker: '发布窗口尚未确认。',
+          needUserAction: '请确认发布时间窗口。',
+          eventSeq: 1,
+          updatedAt: missionUpdatedAt + 1,
+        }),
+      },
+      createdAt: missionUpdatedAt + 1,
+    }];
     runtime.services.agentJobs.updateJob(job.id, {
       status: 'completed',
       running: false,
       stopRequested: false,
       missionRuntimeState: waitingUserState,
     });
+
+    const showWaiting = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent show 1',
+    });
+    const showWaitingText = showWaiting.messages.map((message) => message.text).join('\n');
+    assert.match(showWaitingText, /当前循环：2/);
+    assert.match(showWaitingText, /当前阶段：verifier\.waiting_user/);
+    assert.match(showWaitingText, /当前进展：等待用户确认发布窗口。/);
+    assert.match(showWaitingText, /总体完成：0%/);
+    assert.match(showWaitingText, /当前清单项：/);
+    assert.match(showWaitingText, /下一步：等待用户提供发布时间窗口后再继续。/);
+    assert.match(showWaitingText, /需补充信息：请确认发布时间窗口。/);
+    assert.match(showWaitingText, /补充信息并继续：\/agent confirm 1 <补充信息>/);
+    assert.match(showWaitingText, /满足继续条件后：\/agent confirm 1/);
+    assert.match(showWaitingText, /阻塞：等待用户确认。|阻塞：发布窗口尚未确认。/);
+    assert.match(showWaitingText, /验证：等待用户确认。/);
+
+    const resumed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent confirm 1 发布时间窗口改为今晚 21:00 UTC',
+    });
+    assert.match(resumed.messages.map((message) => message.text).join('\n'), /Agent 任务已确认继续，现已重新排队/);
+    assert.match(resumed.messages.map((message) => message.text).join('\n'), /已记录补充信息：发布时间窗口改为今晚 21:00 UTC/);
+    assert.equal(resumed.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const resumedJob = runtime.services.agentJobs.getById(job.id);
+    assert.equal((resumedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.status, 'queued');
+    assert.equal((resumedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.activeGenerationIndex, 1);
+    assert.equal(resumedJob?.missionRuntimeState?.attempts.length ?? -1, 1);
+    assert.match(
+      String((resumedJob?.missionRuntimeState?.mission as any)?.workpad?.notes?.at(-1) ?? ''),
+      /发布时间窗口改为今晚 21:00 UTC/,
+    );
+
+    const maxLoopsState = structuredClone(completedState);
+    (maxLoopsState.mission as Record<string, unknown>).status = 'max_loops_reached';
+    (maxLoopsState.mission as Record<string, unknown>).completedAt = null;
+    (maxLoopsState.mission as Record<string, unknown>).statusReason = 'Mission loop budget exhausted: max cycles reached (1/1).';
+    (maxLoopsState.mission as Record<string, unknown>).lastError = 'Mission loop budget exhausted: max cycles reached (1/1).';
+    (maxLoopsState.mission as Record<string, unknown>).workpad = {
+      ...(maxLoopsState.mission as any).workpad,
+      latestBlocker: 'Mission loop budget exhausted: max cycles reached (1/1).',
+      latestVerifierSummary: 'Mission loop budget exhausted: max cycles reached (1/1).',
+      updatedAt: missionUpdatedAt + 2,
+    };
+    (maxLoopsState.mission as Record<string, unknown>).updatedAt = missionUpdatedAt + 2;
+    (maxLoopsState as Record<string, unknown>).events = [{
+      id: `${job.id}-max-loops-event-1`,
+      missionId: job.id,
+      attemptId,
+      generationId: (maxLoopsState.mission as any).activeGenerationId,
+      generationIndex: 1,
+      kind: 'mission.max_loops_reached',
+      summary: 'Mission loop budget exhausted: max cycles reached (1/1).',
+      detail: null,
+      metadata: {
+        cycleResult: createMissionCycleResult({
+          mission: maxLoopsState.mission as any,
+          attempt: maxLoopsState.attempts[0] as any,
+          checklistSnapshot: createMissionChecklistSnapshot(maxLoopsState.mission as any, {
+            at: missionUpdatedAt + 2,
+          }),
+          cycle: 3,
+          status: 'failed',
+          stage: 'runtime.max_cycles',
+          progress: 'Mission loop budget exhausted: max cycles reached (1/1).',
+          nextStep: 'Retry the mission to open a new generation with a fresh cycle budget.',
+          verifierSummary: 'Mission loop budget exhausted: max cycles reached (1/1).',
+          blocker: 'Mission loop budget exhausted: max cycles reached (1/1).',
+          eventSeq: 2,
+          updatedAt: missionUpdatedAt + 2,
+        }),
+      },
+      createdAt: missionUpdatedAt + 2,
+    }];
+    runtime.services.agentJobs.getMissionRepository().saveMission(maxLoopsState.mission as any);
+    runtime.services.agentJobs.getMissionRepository().appendEvent((maxLoopsState.events as any[])[0] as any);
+    runtime.services.agentJobs.updateJob(job.id, {
+      status: 'completed',
+      running: false,
+      stopRequested: false,
+      missionRuntimeState: maxLoopsState,
+    });
+
+    const showMaxLoops = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent show 1',
+    });
+    const showMaxLoopsText = showMaxLoops.messages.map((message) => message.text).join('\n');
+    assert.match(showMaxLoopsText, /状态：已达到循环上限/);
+    assert.match(showMaxLoopsText, /当前阶段：runtime\.max_cycles/);
+    assert.match(showMaxLoopsText, /下一步：Retry the mission to open a new generation with a fresh cycle budget\./);
+
+    runtime.services.agentJobs.updateJob(job.id, {
+      status: 'completed',
+      running: false,
+      stopRequested: false,
+      missionRuntimeState: structuredClone(waitingUserState),
+    });
+    runtime.services.agentJobs.getMissionRepository().saveMission(waitingUserState.mission as any);
 
     const stopped = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7969,7 +8146,8 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
 
     const retriedJob = runtime.services.agentJobs.getById(job.id);
     assert.equal((retriedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.status, 'queued');
-    assert.equal(retriedJob?.missionRuntimeState?.attempts.length ?? -1, 0);
+    assert.equal(retriedJob?.missionRuntimeState?.attempts.length ?? -1, 1);
+    assert.equal((retriedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.activeGenerationIndex, 2);
 
     const showRetried = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7979,6 +8157,178 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     const showRetriedText = showRetried.messages.map((message) => message.text).join('\n');
     assert.match(showRetriedText, /状态：排队中/);
     assert.doesNotMatch(showRetriedText, /所有验收项已满足。/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent show and confirm resolve package-backed scope change proposals without new host commands', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-plan-change-1',
+      text: '/agent 检查发布流程并补上 dry-run 验证',
+    });
+    const { index } = await fullyConfirmLatestAgentJob(runtime, 'wx-agent-plan-change-1');
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-plan-change-1',
+    });
+    const runningDetail = runtime.services.agentJobs.getMissionDetail(job.id);
+    const running = transitionMission(runningDetail!.mission, 'running', {
+      at: (runningDetail?.mission.updatedAt ?? 0) + 1,
+      activeAttemptId: `${job.id}-attempt-scope-change-1`,
+    });
+    running.attemptCount = 1;
+    runtime.services.agentJobs.getMissionRepository().saveMission(running);
+
+    runtime.services.agentJobs.proposePlanChange(job.id, {
+      rationale: '需要把 release dry-run 纳入验收条件。',
+      proposedExpectedOutput: '一份验证通过的修复总结，并附 release dry-run 结果。',
+      proposedAcceptanceCriteria: ['补丁存在', '测试通过', 'release dry-run 通过'],
+      proposedPlan: ['检查发布流程', '补齐 dry-run 验证', '重新核对验收条件'],
+    });
+
+    const showPending = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-plan-change-1',
+      text: `/agent show ${index}`,
+    });
+    const showPendingText = showPending.messages.map((message) => message.text).join('\n');
+    assert.match(showPendingText, /状态：等待确认范围变更/);
+    assert.match(showPendingText, /待确认范围变更：/);
+    assert.match(showPendingText, /变更原因：需要把 release dry-run 纳入验收条件。/);
+    assert.match(showPendingText, /拟更新交付物：一份验证通过的修复总结，并附 release dry-run 结果。/);
+    assert.match(showPendingText, /拟更新验收条件：/);
+    assert.match(showPendingText, /批准并继续：\/agent confirm 1/);
+    assert.match(showPendingText, /拒绝并继续当前清单：\/agent confirm 1 reject/);
+
+    const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-plan-change-1',
+      text: `/agent confirm ${index} reject`,
+    });
+    assert.match(rejected.messages.map((message) => message.text).join('\n'), /范围变更已拒绝/);
+    assert.equal(rejected.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const rejectedDetail = runtime.services.agentJobs.getMissionDetail(job.id);
+    assert.equal(rejectedDetail?.mission.status, 'queued');
+    assert.equal(rejectedDetail?.currentChecklistSnapshot?.version, 1);
+    assert.equal(rejectedDetail?.planChangeRequests.at(-1)?.status, 'rejected');
+
+    const rerunning = transitionMission(rejectedDetail!.mission, 'running', {
+      at: rejectedDetail!.mission.updatedAt + 1,
+      activeAttemptId: `${job.id}-attempt-scope-change-2`,
+    });
+    rerunning.attemptCount = 2;
+    runtime.services.agentJobs.getMissionRepository().saveMission(rerunning);
+
+    runtime.services.agentJobs.proposePlanChange(job.id, {
+      rationale: '确认后把 dry-run 结果正式纳入交付和验收。',
+      proposedExpectedOutput: '一份验证通过的修复总结，并附 release dry-run 结果。',
+      proposedAcceptanceCriteria: ['补丁存在', '测试通过', 'release dry-run 通过'],
+      proposedPlan: ['检查发布流程', '补齐 dry-run 验证', '重新核对验收条件'],
+    });
+
+    const approved = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-plan-change-1',
+      text: `/agent confirm ${index}`,
+    });
+    assert.match(approved.messages.map((message) => message.text).join('\n'), /范围变更已确认/);
+    assert.equal(approved.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const approvedDetail = runtime.services.agentJobs.getMissionDetail(job.id);
+    assert.equal(approvedDetail?.mission.status, 'queued');
+    assert.equal(approvedDetail?.mission.expectedOutput, '一份验证通过的修复总结，并附 release dry-run 结果。');
+    assert.deepEqual(
+      approvedDetail?.mission.acceptanceCriteria,
+      ['补丁存在', '测试通过', 'release dry-run 通过'],
+    );
+    assert.equal(approvedDetail?.currentChecklistSnapshot?.version, 2);
+    assert.equal(approvedDetail?.planChangeRequests.at(-1)?.status, 'applied');
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent show and confirm can submit paused approval decisions with attached input without shell-log inspection', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+      text: '/agent 准备发布说明并等待我确认发布时间窗',
+    });
+    const { index } = await fullyConfirmLatestAgentJob(runtime, 'wx-agent-paused-approval-1');
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+    });
+    const detail = runtime.services.agentJobs.getMissionDetail(job.id);
+    const running = transitionMission(detail!.mission, 'running', {
+      at: detail!.mission.updatedAt + 1,
+      activeAttemptId: `${job.id}-attempt-paused-approval-1`,
+    });
+    running.attemptCount = 1;
+    const waiting = transitionMission(running, 'waiting_user', {
+      at: running.updatedAt + 1,
+      activeAttemptId: `${job.id}-attempt-paused-approval-1`,
+      reason: 'Need approval on the deployment window before continuing.',
+      lastError: 'Need approval on the deployment window before continuing.',
+      pendingApproval: {
+        requestId: `${job.id}-approval-paused-1`,
+        kind: 'manual',
+        summary: 'Approve or reject the deployment window before continuing.',
+        options: [
+          { index: 1, label: 'Approve window' },
+          { index: 2, label: 'Reject window' },
+        ],
+        createdAt: running.updatedAt + 1,
+      },
+    });
+    waiting.workpad.summary = 'Mission paused pending deployment-window approval.';
+    waiting.workpad.latestBlocker = 'Need approval on the deployment window before continuing.';
+    waiting.workpad.latestVerifierSummary = 'Waiting for the deployment-window decision.';
+    runtime.services.agentJobs.getMissionRepository().saveMission(waiting);
+
+    const showPending = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+      text: `/agent show ${index}`,
+    });
+    const showPendingText = showPending.messages.map((message) => message.text).join('\n');
+    assert.match(showPendingText, /待确认事项：Approve or reject the deployment window before continuing\./);
+    assert.match(showPendingText, /确认并继续：\/agent confirm 1/);
+    assert.match(showPendingText, /拒绝并继续：\/agent confirm 1 reject/);
+    assert.match(showPendingText, /补充信息并继续：\/agent confirm 1 <补充信息>/);
+
+    const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+      text: `/agent confirm ${index} reject 今天先不要发，等明早 09:00 UTC`,
+    });
+    const rejectedText = rejected.messages.map((message) => message.text ?? '').join('\n');
+    assert.match(rejectedText, /已记录拒绝决定/);
+    assert.match(rejectedText, /已记录补充信息：今天先不要发，等明早 09:00 UTC/);
+    assert.equal(rejected.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const rejectedDetail = runtime.services.agentJobs.getMissionDetail(job.id);
+    assert.equal(rejectedDetail?.mission.status, 'queued');
+    assert.match(rejectedDetail?.workpadStatus.notes.at(-1) ?? '', /今天先不要发，等明早 09:00 UTC/);
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -7998,11 +8348,7 @@ test('/agent runAgentJob retries after an interrupted provider turn and complete
       externalScopeId: 'wx-agent-interrupted-1',
       text: '/agent 检查当前项目测试并修复失败项',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-interrupted-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-interrupted-1');
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
       externalScopeId: 'wx-agent-interrupted-1',
@@ -8075,11 +8421,7 @@ test('/agent runAgentJob continues the same attempt after a normal partial provi
       externalScopeId: 'wx-agent-continuation-1',
       text: '/agent 检查当前项目测试并修复失败项',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-continuation-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-continuation-1');
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
       externalScopeId: 'wx-agent-continuation-1',
@@ -8168,11 +8510,7 @@ Stop and hand off when you need human approval.
       externalScopeId: 'wx-agent-workflow-1',
       text: '/agent 检查当前项目测试并修复失败项',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-workflow-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-workflow-1');
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
       externalScopeId: 'wx-agent-workflow-1',
@@ -8224,11 +8562,7 @@ test('/agent runAgentJob forwards provider approval requests to the supplied app
       externalScopeId: 'wx-agent-approval-1',
       text: '/agent 检查当前项目测试并修复失败项',
     });
-    await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-approval-1',
-      text: '/agent confirm',
-    });
+    await fullyConfirmLatestAgentJob(runtime, 'wx-agent-approval-1');
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
       externalScopeId: 'wx-agent-approval-1',

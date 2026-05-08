@@ -181,6 +181,8 @@ export type AgentJobRiskLevel = 'low' | 'medium' | 'high';
 export type AgentJobMode = 'codex' | 'agents' | 'hybrid';
 
 export type AgentJobStatus =
+  | 'awaiting_checklist_confirm'
+  | 'awaiting_prompt_confirm'
   | 'queued'
   | 'planning'
   | 'running'
@@ -188,14 +190,22 @@ export type AgentJobStatus =
   | 'repairing'
   | 'waiting_user'
   | 'needs_human'
+  | 'scope_change_pending'
   | 'handoff'
   | 'blocked'
+  | 'max_loops_reached'
   | 'completed'
   | 'failed'
   | 'stopped';
 
 export interface MissionRuntimeStateSnapshot {
+  workItem?: Record<string, unknown> | null;
   mission: Record<string, unknown> | null;
+  generations?: Record<string, unknown>[];
+  checklistSnapshots?: Record<string, unknown>[];
+  planChangeRequests?: Record<string, unknown>[];
+  environmentStamps?: Record<string, unknown>[];
+  checkpoints?: Record<string, unknown>[];
   attempts: Record<string, unknown>[];
   events: Record<string, unknown>[];
 }

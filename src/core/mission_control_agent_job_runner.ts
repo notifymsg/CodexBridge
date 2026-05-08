@@ -1,24 +1,37 @@
 import {
   MissionRuntime,
+  type MissionHostAdapter,
+  RepositoryMissionProgressSink,
   createMission,
   createMissionVerifierResult,
   isMissionResumable,
   normalizeCodexMissionDriverResult,
+  normalizeMissionRecord,
   transitionMission,
+  type ChecklistItem,
+  type ChecklistSnapshot,
   type Mission,
   type MissionAttempt,
+  type MissionCheckpoint,
+  type MissionEnvironmentStamp,
   type MissionEvent,
+  type MissionGeneration,
+  type MissionHostNotification,
   type MissionExecutionInput,
+  type PlanChangeRequest,
   type MissionProvider,
   type MissionProviderArtifact,
+  type MissionProgressSink,
   type MissionProviderResult,
   type MissionRepository,
   type MissionRunResult,
   type MissionStatus,
   type MissionVerifier,
   type MissionVerifierResult,
+  type WorkItem,
 } from '../../packages/mission-control/src/index.js';
 import { AgentJobService } from './agent_job_service.js';
+import { CodexBridgeMissionHostAdapter } from './mission_control_host_adapter.js';
 import type {
   AgentJob,
   AgentJobAttemptHistoryEntry,
@@ -32,6 +45,7 @@ import type { OutputArtifact, ProviderApprovalRequest, ProviderTurnProgress } fr
 
 type ProgressHandler = ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
 type ApprovalHandler = ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+type NotificationHandler = ((notification: MissionHostNotification) => Promise<void> | void) | null;
 
 type AgentVerificationResultLike = {
   pass: boolean;
@@ -93,6 +107,7 @@ export interface RunAgentJobWithMissionControlOptions {
   now?: () => number;
   onProgress?: ProgressHandler;
   onApprovalRequest?: ApprovalHandler;
+  onNotification?: NotificationHandler;
 }
 
 export interface MissionControlAgentJobRunOutput {
@@ -103,8 +118,14 @@ export interface MissionControlAgentJobRunOutput {
 }
 
 type MissionRuntimeState = {
+  workItem: WorkItem | null;
   mission: Mission | null;
+  generations: MissionGeneration[];
+  checklistSnapshots: ChecklistSnapshot[];
+  planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
+  environmentStamps: MissionEnvironmentStamp[];
+  checkpoints: MissionCheckpoint[];
   events: MissionEvent[];
 };
 
@@ -116,41 +137,67 @@ export async function runAgentJobWithMissionControl(
   options: RunAgentJobWithMissionControlOptions,
 ): Promise<MissionControlAgentJobRunOutput> {
   const now = options.now ?? (() => Date.now());
-  const repository = new AgentJobMissionRepository(options.agentJobs, now);
+  const currentJob = options.agentJobs.getById(options.job.id) ?? options.job;
+  options.agentJobs.ensureMissionRecord(currentJob.id);
+  const repository = options.agentJobs.getMissionRepository();
   const scopeRef = {
-    platform: options.job.platform,
-    externalScopeId: options.job.externalScopeId,
+    platform: currentJob.platform,
+    externalScopeId: currentJob.externalScopeId,
   };
-  const initialSession = options.resolveSession(options.job);
+  const initialSession = options.resolveSession(currentJob);
   const mission = prepareMissionSnapshot({
-    job: options.job,
+    job: currentJob,
     session: initialSession,
     repository,
     now,
   });
-  const syncBridgeSession = (nextSession: BridgeSession) => {
+  const bindThread = (input: {
+    missionId: string;
+    hostSessionId: string | null;
+    bridgeSessionId?: string | null;
+    providerThreadId: string | null;
+  }) => {
+    const hostSessionId = input.hostSessionId ?? input.bridgeSessionId ?? null;
     const currentJob = options.agentJobs.getById(options.job.id);
-    if (currentJob && currentJob.bridgeSessionId !== nextSession.id) {
+    if (currentJob && hostSessionId && currentJob.bridgeSessionId !== hostSessionId) {
       options.agentJobs.updateJob(currentJob.id, {
-        bridgeSessionId: nextSession.id,
+        bridgeSessionId: hostSessionId,
       });
     }
-    const currentMission = repository.getMissionById(options.job.id);
+    const currentMission = repository.getMissionById(input.missionId);
     if (
       currentMission
       && (
-        currentMission.bridgeSessionId !== nextSession.id
-        || currentMission.codexThreadId !== nextSession.codexThreadId
+        currentMission.bridgeSessionId !== hostSessionId
+        || currentMission.codexThreadId !== input.providerThreadId
       )
     ) {
       repository.saveMission({
         ...currentMission,
-        bridgeSessionId: nextSession.id,
-        codexThreadId: nextSession.codexThreadId,
+        bridgeSessionId: hostSessionId,
+        codexThreadId: input.providerThreadId,
         updatedAt: now(),
       });
     }
   };
+  const hostAdapter = new CodexBridgeMissionHostAdapter({
+    jobId: options.job.id,
+    resolveJob: () => options.agentJobs.getById(options.job.id) ?? options.job,
+    resolveSession: () => options.resolveSession(options.agentJobs.getById(options.job.id) ?? options.job),
+    bindThread,
+    onProgress: options.onProgress ?? null,
+    onApprovalRequest: options.onApprovalRequest ?? null,
+    onNotification: options.onNotification ?? null,
+  });
+  let progressEventCounter = 0;
+  const progressSink = new RepositoryMissionProgressSink({
+    repository,
+    now,
+    generateId: () => {
+      progressEventCounter += 1;
+      return `mission-progress:${options.job.id}:${progressEventCounter}`;
+    },
+  });
   const provider = new BridgeMissionProvider({
     jobId: options.job.id,
     scopeRef,
@@ -159,9 +206,8 @@ export async function runAgentJobWithMissionControl(
     startTurnWithRecovery: options.startTurnWithRecovery,
     stopSession: options.stopSession,
     progressText: options.progressText,
-    onProgress: options.onProgress ?? null,
-    onApprovalRequest: options.onApprovalRequest ?? null,
-    syncBridgeSession,
+    hostAdapter,
+    progressSink,
   });
   const verifier = new BridgeMissionVerifier({
     jobId: options.job.id,
@@ -169,13 +215,15 @@ export async function runAgentJobWithMissionControl(
     provider,
     verifyJob: options.verifyJob,
     progressText: options.progressText,
-    onProgress: options.onProgress ?? null,
+    hostAdapter,
+    progressSink,
   });
 
   const runtime = new MissionRuntime({
     repository,
     provider,
     verifier,
+    hostAdapter,
     now,
   });
   const runResult = await runtime.runMission(mission.id, {
@@ -206,6 +254,31 @@ class AgentJobMissionRepository implements MissionRepository {
     return job ? loadMissionRuntimeState(job).mission : null;
   }
 
+  getWorkItemById(id: string): WorkItem | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const workItem = loadMissionRuntimeState(job).workItem;
+      if (workItem?.id === id) {
+        return cloneValue(workItem);
+      }
+    }
+    return null;
+  }
+
+  saveWorkItem(workItem: WorkItem): WorkItem {
+    const currentJob = this.agentJobs
+      .listAllJobs()
+      .find((job) => loadMissionRuntimeState(job).mission?.workItemId === workItem.id);
+    if (!currentJob) {
+      return workItem;
+    }
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      workItem: cloneValue(workItem),
+    });
+    return workItem;
+  }
+
   listMissions(): Mission[] {
     return this.agentJobs
       .listAllJobs()
@@ -226,6 +299,82 @@ class AgentJobMissionRepository implements MissionRepository {
     };
     this.persistState(currentJob, nextState);
     return mission;
+  }
+
+  getGenerationById(id: string): MissionGeneration | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const generation = loadMissionRuntimeState(job).generations.find((entry) => entry.id === id);
+      if (generation) {
+        return cloneValue(generation);
+      }
+    }
+    return null;
+  }
+
+  listGenerations(missionId: string): MissionGeneration[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).generations : [];
+  }
+
+  saveGeneration(generation: MissionGeneration): MissionGeneration {
+    const currentJob = this.agentJobs.requireById(generation.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      generations: upsertById(currentState.generations, generation).sort((left, right) => left.index - right.index),
+    });
+    return generation;
+  }
+
+  getChecklistSnapshotById(id: string): ChecklistSnapshot | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const snapshot = loadMissionRuntimeState(job).checklistSnapshots.find((entry) => entry.id === id);
+      if (snapshot) {
+        return cloneValue(snapshot);
+      }
+    }
+    return null;
+  }
+
+  listChecklistSnapshots(missionId: string): ChecklistSnapshot[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).checklistSnapshots : [];
+  }
+
+  saveChecklistSnapshot(snapshot: ChecklistSnapshot): ChecklistSnapshot {
+    const currentJob = this.agentJobs.requireById(snapshot.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      checklistSnapshots: upsertById(currentState.checklistSnapshots, snapshot)
+        .sort((left, right) => left.version - right.version),
+    });
+    return snapshot;
+  }
+
+  getPlanChangeRequestById(id: string): PlanChangeRequest | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const changeRequest = loadMissionRuntimeState(job).planChangeRequests.find((entry) => entry.id === id);
+      if (changeRequest) {
+        return cloneValue(changeRequest);
+      }
+    }
+    return null;
+  }
+
+  listPlanChangeRequests(missionId: string): PlanChangeRequest[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).planChangeRequests : [];
+  }
+
+  savePlanChangeRequest(changeRequest: PlanChangeRequest): PlanChangeRequest {
+    const currentJob = this.agentJobs.requireById(changeRequest.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      planChangeRequests: upsertById(currentState.planChangeRequests, changeRequest),
+    });
+    return changeRequest;
   }
 
   getAttemptById(id: string): MissionAttempt | null {
@@ -255,6 +404,62 @@ class AgentJobMissionRepository implements MissionRepository {
     return attempt;
   }
 
+  getEnvironmentStampById(id: string): MissionEnvironmentStamp | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const state = loadMissionRuntimeState(job);
+      const stamp = state.environmentStamps.find((entry) => entry.id === id);
+      if (stamp) {
+        return cloneValue(stamp);
+      }
+    }
+    return null;
+  }
+
+  listEnvironmentStamps(missionId: string): MissionEnvironmentStamp[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).environmentStamps : [];
+  }
+
+  saveEnvironmentStamp(stamp: MissionEnvironmentStamp): MissionEnvironmentStamp {
+    const currentJob = this.agentJobs.requireById(stamp.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    const nextState: MissionRuntimeState = {
+      ...currentState,
+      environmentStamps: upsertById(currentState.environmentStamps, stamp)
+        .sort((left, right) => left.capturedAt - right.capturedAt),
+    };
+    this.persistState(currentJob, nextState);
+    return stamp;
+  }
+
+  getCheckpointById(id: string): MissionCheckpoint | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const state = loadMissionRuntimeState(job);
+      const checkpoint = state.checkpoints.find((entry) => entry.id === id);
+      if (checkpoint) {
+        return cloneValue(checkpoint);
+      }
+    }
+    return null;
+  }
+
+  listCheckpoints(missionId: string): MissionCheckpoint[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).checkpoints : [];
+  }
+
+  saveCheckpoint(checkpoint: MissionCheckpoint): MissionCheckpoint {
+    const currentJob = this.agentJobs.requireById(checkpoint.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    const nextState: MissionRuntimeState = {
+      ...currentState,
+      checkpoints: upsertById(currentState.checkpoints, checkpoint)
+        .sort((left, right) => left.createdAt - right.createdAt),
+    };
+    this.persistState(currentJob, nextState);
+    return checkpoint;
+  }
+
   listEvents(missionId: string): MissionEvent[] {
     const job = this.agentJobs.getById(missionId);
     return job ? loadMissionRuntimeState(job).events : [];
@@ -274,8 +479,14 @@ class AgentJobMissionRepository implements MissionRepository {
   resetMission(mission: Mission): Mission {
     const currentJob = this.agentJobs.requireById(mission.id);
     this.persistState(currentJob, {
+      workItem: null,
       mission: cloneValue(mission),
+      generations: [],
+      checklistSnapshots: [],
+      planChangeRequests: [],
       attempts: [],
+      environmentStamps: [],
+      checkpoints: [],
       events: [],
     });
     return mission;
@@ -306,9 +517,8 @@ class BridgeMissionProvider implements MissionProvider {
     startTurnWithRecovery: RunAgentJobWithMissionControlOptions['startTurnWithRecovery'];
     stopSession: RunAgentJobWithMissionControlOptions['stopSession'];
     progressText: MissionControlAgentJobRunProgressText;
-    onProgress: ProgressHandler;
-    onApprovalRequest: ApprovalHandler;
-    syncBridgeSession: (session: BridgeSession) => void;
+    hostAdapter: MissionHostAdapter;
+    progressSink: MissionProgressSink;
   }) {}
 
   async start(input: MissionExecutionInput) {
@@ -348,12 +558,27 @@ class BridgeMissionProvider implements MissionProvider {
     if (!session) {
       throw new Error('Agent mission session is missing.');
     }
+    const hostContext = await this.options.hostAdapter.getContext(input.mission.id);
     if (!this.runningAttempts.has(input.attempt.id)) {
       this.runningAttempts.add(input.attempt.id);
-      await emitProgress(
-        this.options.onProgress,
-        this.options.progressText.running(input.attempt.index, input.mission.maxAttempts),
-      );
+      await this.options.progressSink.appendProgress({
+        missionId: input.mission.id,
+        attemptId: input.attempt.id,
+        checklistItemId: null,
+        kind: 'summary',
+        message: this.options.progressText.running(input.attempt.index, input.mission.maxAttempts),
+        metadata: {
+          source: 'bridge-runner',
+          stage: 'running',
+        },
+      });
+      await this.options.hostAdapter.publishProgress({
+        missionId: input.mission.id,
+        attemptId: input.attempt.id,
+        status: 'running',
+        text: this.options.progressText.running(input.attempt.index, input.mission.maxAttempts),
+        outputKind: 'commentary',
+      });
     }
     this.runCounter += 1;
     const runId = `${input.attempt.id}-provider-turn-${this.runCounter}`;
@@ -363,13 +588,13 @@ class BridgeMissionProvider implements MissionProvider {
       {
         platform: input.mission.platform,
         externalScopeId: input.mission.externalScopeId,
-        text: buildAgentMissionExecutionPrompt(input.promptText, liveJob.locale),
+        text: buildAgentMissionExecutionPrompt(input.promptText, hostContext.locale ?? liveJob.locale),
         cwd: liveJob.cwd ?? input.mission.cwd,
-        locale: liveJob.locale,
+        locale: hostContext.locale ?? liveJob.locale,
         attachments: [],
         metadata: {
           codexbridge: {
-            overrideBridgeSessionId: session.id,
+            overrideBridgeSessionId: hostContext.hostSessionId ?? hostContext.bridgeSessionId ?? session.id,
             agentJobId: this.options.jobId,
             agentAttempt: input.attempt.index,
             missionId: input.mission.id,
@@ -378,12 +603,50 @@ class BridgeMissionProvider implements MissionProvider {
         },
       },
       {
-        onProgress: this.options.onProgress,
-        onApprovalRequest: this.options.onApprovalRequest,
+        onProgress: async (progress) => {
+          const message = progress.text ?? progress.delta;
+          await this.options.progressSink.appendProgress({
+            missionId: input.mission.id,
+            attemptId: input.attempt.id,
+            checklistItemId: null,
+            kind: progress.outputKind === 'status' ? 'summary' : 'substep',
+            message,
+            metadata: {
+              source: 'provider',
+              delta: progress.delta,
+              outputKind: progress.outputKind,
+            },
+          });
+          await this.options.hostAdapter.publishProgress({
+            missionId: input.mission.id,
+            attemptId: input.attempt.id,
+            status: 'running',
+            text: message,
+            outputKind: progress.outputKind === 'status' ? 'status' : 'commentary',
+            details: {
+              delta: progress.delta,
+            },
+          });
+        },
+        onApprovalRequest: async (request) => {
+          await this.options.hostAdapter.requestApproval(buildMissionHostApprovalRequest(input, request));
+        },
       },
     );
-    this.options.syncBridgeSession(execution.session);
     const normalizedResult = normalizeBridgeMissionProviderResult(execution.result);
+    await this.options.hostAdapter.bindProviderThread({
+      missionId: input.mission.id,
+      hostSessionId: execution.session.id,
+      bridgeSessionId: execution.session.id,
+      providerThreadId: execution.session.codexThreadId,
+    });
+    if (normalizedResult.artifacts.length > 0) {
+      await this.options.hostAdapter.publishArtifacts({
+        missionId: input.mission.id,
+        attemptId: input.attempt.id,
+        artifacts: normalizedResult.artifacts,
+      });
+    }
     const record: BridgeMissionExecutionRecord = {
       ...execution,
       normalizedResult: normalizedResult.outcome === 'interrupted' && !liveJob.stopRequested
@@ -419,15 +682,35 @@ class BridgeMissionVerifier implements MissionVerifier {
     provider: BridgeMissionProvider;
     verifyJob: RunAgentJobWithMissionControlOptions['verifyJob'];
     progressText: MissionControlAgentJobRunProgressText;
-    onProgress: ProgressHandler;
+    hostAdapter: MissionHostAdapter;
+    progressSink: MissionProgressSink;
   }) {}
 
   async verify(input: {
     mission: Mission;
     attempt: MissionAttempt;
+    checklistSnapshot: ChecklistSnapshot | null;
+    activeChecklistItem: ChecklistItem | null;
     providerResult: MissionProviderResult;
   }): Promise<MissionVerifierResult> {
-    await emitProgress(this.options.onProgress, this.options.progressText.verifying());
+    await this.options.progressSink.appendProgress({
+      missionId: input.mission.id,
+      attemptId: input.attempt.id,
+      checklistItemId: input.activeChecklistItem?.id ?? null,
+      kind: 'summary',
+      message: this.options.progressText.verifying(),
+      metadata: {
+        source: 'bridge-verifier',
+        stage: 'verifying',
+      },
+    });
+    await this.options.hostAdapter.publishProgress({
+      missionId: input.mission.id,
+      attemptId: input.attempt.id,
+      status: 'verifying',
+      text: this.options.progressText.verifying(),
+      outputKind: 'commentary',
+    });
     const currentJob = this.options.agentJobs.getById(this.options.jobId);
     if (!currentJob) {
       return createMissionVerifierResult({
@@ -444,7 +727,25 @@ class BridgeMissionVerifier implements MissionVerifier {
       execution?.session ?? null,
     );
     if (!verification.pass && verification.nextAction === 'retry') {
-      await emitProgress(this.options.onProgress, this.options.progressText.retrying());
+      await this.options.progressSink.appendProgress({
+        missionId: input.mission.id,
+        attemptId: input.attempt.id,
+        checklistItemId: input.activeChecklistItem?.id ?? null,
+        kind: 'blocker',
+        message: verification.summary,
+        metadata: {
+          source: 'bridge-verifier',
+          stage: 'repair',
+          issues: verification.issues,
+        },
+      });
+      await this.options.hostAdapter.publishProgress({
+        missionId: input.mission.id,
+        attemptId: input.attempt.id,
+        status: 'repairing',
+        text: this.options.progressText.retrying(),
+        outputKind: 'commentary',
+      });
     }
     return createMissionVerifierResult({
       verdict: verification.pass || verification.nextAction === 'complete'
@@ -461,7 +762,7 @@ class BridgeMissionVerifier implements MissionVerifier {
 function prepareMissionSnapshot(input: {
   job: AgentJob;
   session: BridgeSession | null;
-  repository: AgentJobMissionRepository;
+  repository: MissionRepository;
   now: () => number;
 }): Mission {
   const existing = input.repository.getMissionById(input.job.id);
@@ -520,11 +821,18 @@ function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): P
       missionAttemptHistory: [],
     };
   }
-  const attempts = [...state.attempts].sort((left, right) => left.index - right.index);
+  const attempts = [...state.attempts].sort((left, right) => {
+    const leftGeneration = left.generationIndex ?? 0;
+    const rightGeneration = right.generationIndex ?? 0;
+    if (leftGeneration !== rightGeneration) {
+      return leftGeneration - rightGeneration;
+    }
+    return left.index - right.index;
+  });
   return {
     status: mapMissionStatusToAgentJobStatus(mission.status),
     running: ACTIVE_MISSION_JOB_STATUS_SET.has(mission.status),
-    stopRequested: mission.status === 'stopped',
+    stopRequested: Boolean(mission.stopRequest) || mission.status === 'stopped',
     attemptCount: mission.attemptCount,
     lastRunAt: mission.lastRunAt,
     completedAt: TERMINAL_MISSION_JOB_STATUS_SET.has(mission.status)
@@ -533,8 +841,8 @@ function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): P
     lastResultPreview: summarizeMissionPreview(mission.lastResultPreview, mission.resultArtifacts),
     resultText: mission.resultText,
     resultArtifacts: mapMissionArtifactsToAgentArtifacts(mission.resultArtifacts),
-    lastError: mission.lastError ?? mission.statusReason,
-    verificationSummary: mission.workpad.latestVerifierSummary ?? mission.statusReason,
+    lastError: mission.lastError,
+    verificationSummary: mission.workpad.latestVerifierSummary,
     missionWorkflowPath: mission.workflowPath,
     missionWorkflowSourceLabel: mission.workflowPath
       ? `configured workflow (${mission.workflowPath})`
@@ -578,8 +886,10 @@ function mapMissionStatusToAgentJobStatus(status: MissionStatus): AgentJobStatus
     case 'repairing':
     case 'waiting_user':
     case 'needs_human':
+    case 'scope_change_pending':
     case 'handoff':
     case 'blocked':
+    case 'max_loops_reached':
     case 'completed':
     case 'failed':
     case 'stopped':
@@ -639,9 +949,25 @@ function mapMissionArtifactsToAgentArtifacts(value: unknown[]): TurnArtifactDeli
 function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
   const raw = job.missionRuntimeState;
   return {
-    mission: raw?.mission ? cloneValue(raw.mission as unknown as Mission) : null,
+    workItem: raw?.workItem ? cloneValue(raw.workItem as unknown as WorkItem) : null,
+    mission: raw?.mission ? normalizeMissionRecord(cloneValue(raw.mission as unknown as Mission)) : null,
+    generations: Array.isArray(raw?.generations)
+      ? raw.generations.map((generation) => cloneValue(generation as unknown as MissionGeneration))
+      : [],
+    checklistSnapshots: Array.isArray(raw?.checklistSnapshots)
+      ? raw.checklistSnapshots.map((snapshot) => cloneValue(snapshot as unknown as ChecklistSnapshot))
+      : [],
+    planChangeRequests: Array.isArray(raw?.planChangeRequests)
+      ? raw.planChangeRequests.map((changeRequest) => cloneValue(changeRequest as unknown as PlanChangeRequest))
+      : [],
     attempts: Array.isArray(raw?.attempts)
       ? raw.attempts.map((attempt) => cloneValue(attempt as unknown as MissionAttempt))
+      : [],
+    environmentStamps: Array.isArray(raw?.environmentStamps)
+      ? raw.environmentStamps.map((stamp) => cloneValue(stamp as unknown as MissionEnvironmentStamp))
+      : [],
+    checkpoints: Array.isArray(raw?.checkpoints)
+      ? raw.checkpoints.map((checkpoint) => cloneValue(checkpoint as unknown as MissionCheckpoint))
       : [],
     events: Array.isArray(raw?.events)
       ? raw.events.map((event) => cloneValue(event as unknown as MissionEvent))
@@ -651,8 +977,14 @@ function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
 
 function serializeMissionRuntimeState(state: MissionRuntimeState): AgentJobMissionRuntimeState {
   return {
+    workItem: state.workItem ? (cloneValue(state.workItem) as unknown as Record<string, unknown>) : null,
     mission: state.mission ? (cloneValue(state.mission) as unknown as Record<string, unknown>) : null,
+    generations: state.generations.map((generation) => cloneValue(generation) as unknown as Record<string, unknown>),
+    checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot) as unknown as Record<string, unknown>),
+    planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest) as unknown as Record<string, unknown>),
     attempts: state.attempts.map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
+    environmentStamps: state.environmentStamps.map((stamp) => cloneValue(stamp) as unknown as Record<string, unknown>),
+    checkpoints: state.checkpoints.map((checkpoint) => cloneValue(checkpoint) as unknown as Record<string, unknown>),
     events: state.events.map((event) => cloneValue(event) as unknown as Record<string, unknown>),
   };
 }
@@ -684,6 +1016,34 @@ function missionProviderResultToBridgeResult(result: MissionProviderResult): Bri
       source: 'provider_native',
     })),
     finalSource: 'mission_control_runtime',
+  };
+}
+
+function buildMissionHostApprovalRequest(
+  input: MissionExecutionInput,
+  request: ProviderApprovalRequest,
+) {
+  return {
+    missionId: input.mission.id,
+    attemptId: input.attempt.id,
+    requestId: request.requestId,
+    kind: 'provider' as const,
+    summary: compactString(request.reason)
+      ?? compactString(request.command)
+      ?? 'Provider approval is required before the mission can continue.',
+    options: normalizeProviderApprovalOptions(request.availableDecisionKeys),
+    details: {
+      command: request.command ?? null,
+      cwd: request.cwd ?? null,
+      turnId: request.turnId ?? null,
+      itemId: request.itemId ?? null,
+      fileChanges: request.fileChanges ?? [],
+      grantRoot: request.grantRoot ?? null,
+      networkPermission: request.networkPermission ?? null,
+      fileReadPermissions: request.fileReadPermissions ?? [],
+      fileWritePermissions: request.fileWritePermissions ?? [],
+      execPolicyAmendment: request.execPolicyAmendment ?? [],
+    },
   };
 }
 
@@ -734,21 +1094,6 @@ function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
   return next;
 }
 
-async function emitProgress(handler: ProgressHandler, text: string): Promise<void> {
-  if (typeof handler !== 'function') {
-    return;
-  }
-  const normalized = compactString(text);
-  if (!normalized) {
-    return;
-  }
-  await handler({
-    text: normalized,
-    delta: normalized,
-    outputKind: 'commentary',
-  });
-}
-
 function compactString(value: unknown): string | null {
   const normalized = String(value ?? '').trim();
   return normalized.length > 0 ? normalized : null;
@@ -756,6 +1101,24 @@ function compactString(value: unknown): string | null {
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
+}
+
+function normalizeProviderApprovalOptions(
+  decisionKeys: string[] | null | undefined,
+): Array<{ index: number; label: string; description: string | null }> {
+  const normalized = Array.isArray(decisionKeys)
+    ? decisionKeys
+      .map((value) => compactString(value))
+      .filter(Boolean) as string[]
+    : [];
+  if (normalized.length === 0) {
+    return [{ index: 1, label: 'Approve', description: null }];
+  }
+  return normalized.map((label, index) => ({
+    index: index + 1,
+    label,
+    description: null,
+  }));
 }
 
 const ACTIVE_MISSION_JOB_STATUS_SET = new Set<MissionStatus>([
@@ -768,8 +1131,10 @@ const ACTIVE_MISSION_JOB_STATUS_SET = new Set<MissionStatus>([
 const TERMINAL_MISSION_JOB_STATUS_SET = new Set<MissionStatus>([
   'waiting_user',
   'needs_human',
+  'scope_change_pending',
   'handoff',
   'blocked',
+  'max_loops_reached',
   'completed',
   'failed',
   'stopped',
