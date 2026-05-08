@@ -88,6 +88,7 @@ test('OpenAICompatibleResponsesAdapterServer exposes model capability metadata i
     apiKey: 'test-key',
     models: [{
       id: 'example-model',
+      displayName: 'Example Model',
       capabilities: {
         tools: true,
         vision: false,
@@ -101,6 +102,8 @@ test('OpenAICompatibleResponsesAdapterServer exposes model capability metadata i
     const body = await response.json() as any;
     assert.equal(response.status, 200);
     assert.equal(body.data[0].id, 'example-model');
+    assert.equal(body.data[0].displayName, 'Example Model');
+    assert.equal(body.data[0].display_name, 'Example Model');
     assert.deepEqual(body.data[0].capabilities, {
       tools: true,
       vision: false,

@@ -758,6 +758,8 @@ function normalizeModels(
         object: normalizeString(model?.object) || 'model',
         created: Number.isFinite(Number(model?.created)) ? Number(model.created) : now,
         owned_by: normalizeString(model?.owned_by) || ownedBy,
+        displayName: normalizeString(model?.displayName) || normalizeString(model?.display_name) || id,
+        display_name: normalizeString(model?.display_name) || normalizeString(model?.displayName) || id,
         capabilityCatalog: model?.capabilityCatalog && typeof model.capabilityCatalog === 'object'
           ? model.capabilityCatalog
           : buildOpenAICompatibleCapabilityCatalogMetadata({

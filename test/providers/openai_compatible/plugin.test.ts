@@ -144,3 +144,146 @@ test('OpenAICompatibleProviderPlugin resolves reasoning effort from explicit pro
 
   assert.equal(effort, null);
 });
+
+test('OpenAICompatibleProviderPlugin lists live upstream models instead of stale static aliases', async () => {
+  const plugin = new OpenAICompatibleProviderPlugin({
+    env: {
+      QWEN_API_KEY: 'qwen-key',
+    },
+    fetchImpl: (async () => new Response(JSON.stringify({
+      object: 'list',
+      data: [
+        {
+          id: 'qwen-plus',
+          display_name: 'Qwen Plus',
+        },
+        {
+          id: 'qwen3-coder-plus',
+          display_name: 'Qwen3 Coder Plus',
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch,
+    defaults: {
+      kind: 'qwen',
+      displayName: 'Qwen',
+      apiKeyEnv: 'QWEN_API_KEY',
+      baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+      defaultModel: 'qwen-plus',
+      providerLabel: 'qwen',
+      modelIds: ['qwen-plus'],
+      ownedBy: 'qwen',
+    },
+  });
+
+  const models = await plugin.listModels({
+    providerProfile: makeProfile({
+      apiKeyEnv: 'QWEN_API_KEY',
+      baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+      defaultModel: 'qwen-plus',
+      modelCatalog: [{
+        id: 'coder-model',
+        model: 'coder-model',
+        displayName: 'Qwen 3.6 Plus',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null,
+      }],
+    }),
+  });
+
+  assert.deepEqual(
+    models.map((entry) => entry.id),
+    ['qwen-plus', 'qwen3-coder-plus'],
+  );
+  assert.equal(models[0]?.displayName, 'Qwen Plus');
+  assert.equal(models[0]?.isDefault, true);
+});
+
+test('OpenAICompatibleProviderPlugin falls back to a valid live model when session settings contain a stale model id', async () => {
+  const seenModels: string[] = [];
+  const plugin = new OpenAICompatibleProviderPlugin({
+    env: {
+      QWEN_API_KEY: 'qwen-key',
+    },
+    fetchImpl: (async () => new Response(JSON.stringify({
+      object: 'list',
+      data: [
+        {
+          id: 'qwen-plus',
+          display_name: 'Qwen Plus',
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch,
+    defaults: {
+      kind: 'qwen',
+      displayName: 'Qwen',
+      apiKeyEnv: 'QWEN_API_KEY',
+      baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+      defaultModel: 'qwen-plus',
+      providerLabel: 'qwen',
+      modelIds: ['qwen-plus'],
+      ownedBy: 'qwen',
+    },
+    clientFactory: () => ({
+      async start() {},
+      isConnected() {
+        return true;
+      },
+      async startTurn(params: any) {
+        seenModels.push(String(params.model ?? ''));
+        return {
+          outputText: 'ok',
+          outputState: 'complete',
+          previewText: 'ok',
+          finalSource: 'thread_items',
+          status: 'completed',
+          turnId: 'turn-1',
+          threadId: params.threadId,
+          title: 'Qwen thread',
+        };
+      },
+      async listModels() {
+        return [];
+      },
+      async stop() {},
+    }),
+  });
+
+  await plugin.startTurn({
+    providerProfile: makeProfile({
+      providerKind: 'qwen',
+      displayName: 'Qwen',
+      apiKeyEnv: 'QWEN_API_KEY',
+      baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+      defaultModel: 'qwen-plus',
+    }) as any,
+    bridgeSession: {
+      id: 'bridge-1',
+      providerProfileId: 'compat',
+      providerKind: 'qwen',
+      codexThreadId: 'thread-1',
+      cwd: null,
+      title: 'Qwen thread',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    } as any,
+    sessionSettings: {
+      model: 'coder-model',
+    } as any,
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_test',
+      text: 'hello',
+    } as any,
+    inputText: 'hello',
+  });
+
+  assert.deepEqual(seenModels, ['qwen-plus']);
+});

@@ -77,6 +77,11 @@ interface OpenAICompatibleCodexClientOptions {
   defaults: NormalizedOpenAICompatibleProviderDefaults;
 }
 
+interface LiveModelCacheEntry {
+  models: ProviderModelInfo[];
+  fetchedAt: number;
+}
+
 const DEFAULT_PROVIDER_DEFAULTS: NormalizedOpenAICompatibleProviderDefaults = {
   kind: 'openai-compatible',
   displayName: 'OpenAI Compatible',
@@ -91,9 +96,16 @@ const DEFAULT_PROVIDER_DEFAULTS: NormalizedOpenAICompatibleProviderDefaults = {
     supportsBuiltinWebSearchTool: true,
   },
 };
+const LIVE_MODEL_CACHE_TTL_MS = 30_000;
 
 export class OpenAICompatibleProviderPlugin extends CodexProviderPlugin {
   readonly defaults: NormalizedOpenAICompatibleProviderDefaults;
+
+  private readonly fetchImpl: typeof fetch;
+
+  private readonly env: NodeJS.ProcessEnv;
+
+  private readonly liveModelCache: Map<string, LiveModelCacheEntry>;
 
   constructor(options: OpenAICompatibleProviderPluginOptions = {}) {
     const defaults = normalizeProviderDefaults(options.defaults);
@@ -112,8 +124,40 @@ export class OpenAICompatibleProviderPlugin extends CodexProviderPlugin {
       reviewRunner: options.reviewRunner,
     });
     this.defaults = defaults;
+    this.fetchImpl = fetchImpl;
+    this.env = env;
+    this.liveModelCache = new Map();
     this.kind = defaults.kind;
     this.displayName = defaults.displayName;
+  }
+
+  async listModels({
+    providerProfile,
+  }: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderModelInfo[]> {
+    const liveModels = await this.fetchLiveModels(providerProfile, { force: true });
+    if (liveModels && liveModels.length > 0) {
+      return liveModels;
+    }
+    return super.listModels({ providerProfile });
+  }
+
+  async resolveModelInfo(
+    providerProfile: ProviderProfile,
+    client: any,
+    requestedModel: string | null,
+  ): Promise<ProviderModelInfo | null> {
+    const liveModels = await this.fetchLiveModels(providerProfile);
+    if (liveModels && liveModels.length > 0) {
+      const config = providerProfile.config as OpenAICompatibleProviderProfileConfig;
+      return resolvePreferredModelFromCatalog({
+        models: liveModels,
+        requestedModel,
+        defaultModel: normalizeString(config.defaultModel) || this.defaults.defaultModel,
+      });
+    }
+    return super.resolveModelInfo(providerProfile, client, requestedModel);
   }
 
   async startReview({
@@ -175,6 +219,59 @@ export class OpenAICompatibleProviderPlugin extends CodexProviderPlugin {
       this.defaults.capabilities,
       config.capabilities,
     );
+  }
+
+  private async fetchLiveModels(
+    providerProfile: ProviderProfile,
+    { force = false }: { force?: boolean } = {},
+  ): Promise<ProviderModelInfo[] | null> {
+    const cacheKey = providerProfile.id;
+    const cached = this.liveModelCache.get(cacheKey) ?? null;
+    if (!force && cached && (Date.now() - cached.fetchedAt) < LIVE_MODEL_CACHE_TTL_MS) {
+      return cached.models;
+    }
+
+    const config = providerProfile.config as OpenAICompatibleProviderProfileConfig;
+    const envName = normalizeString(config.apiKeyEnv) || this.defaults.apiKeyEnv;
+    const apiKey = normalizeString(this.env[envName]);
+    const upstreamBaseUrl = normalizeString(config.baseUrl) || this.defaults.baseUrl;
+    if (!apiKey || !upstreamBaseUrl) {
+      return cached?.models ?? null;
+    }
+
+    try {
+      const response = await this.fetchImpl(`${upstreamBaseUrl.replace(/\/+$/u, '')}/models`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+        },
+      });
+      if (!response.ok) {
+        return cached?.models ?? null;
+      }
+      const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+      const rows = Array.isArray(payload?.data) ? payload.data : [];
+      const models = normalizeLiveModelCatalog({
+        rows,
+        staticCatalog: normalizeModelCatalog(
+          config.modelCatalog,
+          this.defaults.modelIds,
+          this.resolveProviderCapabilities(providerProfile),
+        ),
+        defaultModel: normalizeString(config.defaultModel) || this.defaults.defaultModel,
+      });
+      if (models.length === 0) {
+        return cached?.models ?? null;
+      }
+      this.liveModelCache.set(cacheKey, {
+        models,
+        fetchedAt: Date.now(),
+      });
+      return models;
+    } catch {
+      return cached?.models ?? null;
+    }
   }
 }
 
@@ -379,6 +476,112 @@ function normalizeProviderDefaults(defaults: OpenAICompatibleProviderDefaults | 
     upstreamChatCompletionsPath: normalizeString(defaults?.upstreamChatCompletionsPath) || DEFAULT_PROVIDER_DEFAULTS.upstreamChatCompletionsPath,
     capabilities: mergeOpenAICompatibleProviderCapabilities(DEFAULT_PROVIDER_DEFAULTS.capabilities, defaults?.capabilities),
   };
+}
+
+function normalizeLiveModelCatalog({
+  rows,
+  staticCatalog,
+  defaultModel,
+}: {
+  rows: unknown[];
+  staticCatalog: Array<Record<string, unknown>>;
+  defaultModel: string;
+}): ProviderModelInfo[] {
+  const staticById = new Map<string, Record<string, unknown>>();
+  for (const entry of staticCatalog) {
+    const id = normalizeString(entry?.id) || normalizeString(entry?.model);
+    if (!id) {
+      continue;
+    }
+    staticById.set(id.toLowerCase(), entry);
+  }
+
+  const models: ProviderModelInfo[] = [];
+  const seen = new Set<string>();
+  for (const rawEntry of rows) {
+    const entry = rawEntry as Record<string, unknown> | null;
+    const id = normalizeString(entry?.id) || normalizeString(entry?.model);
+    if (!id) {
+      continue;
+    }
+    const normalizedId = id.toLowerCase();
+    if (seen.has(normalizedId)) {
+      continue;
+    }
+    seen.add(normalizedId);
+    const staticEntry = staticById.get(normalizedId) ?? null;
+    models.push({
+      id,
+      model: normalizeString(entry?.model) || id,
+      displayName: normalizeString(entry?.display_name)
+        || normalizeString(entry?.displayName)
+        || normalizeString(entry?.name)
+        || normalizeString(staticEntry?.displayName)
+        || id,
+      description: normalizeString(entry?.description)
+        || normalizeString(staticEntry?.description),
+      isDefault: normalizeBoolean(entry?.is_default)
+        ?? normalizeBoolean(entry?.isDefault)
+        ?? id === defaultModel,
+      supportedReasoningEfforts: normalizeStringList(staticEntry?.supportedReasoningEfforts),
+      defaultReasoningEffort: normalizeString(staticEntry?.defaultReasoningEffort) || null,
+    });
+  }
+
+  if (models.length === 0) {
+    return [];
+  }
+  if (!models.some((entry) => entry.isDefault)) {
+    const configuredDefault = defaultModel.toLowerCase();
+    const defaultEntry = models.find((entry) => entry.id.toLowerCase() === configuredDefault)
+      ?? models[0];
+    if (defaultEntry) {
+      defaultEntry.isDefault = true;
+    }
+  }
+  return models;
+}
+
+function resolvePreferredModelFromCatalog({
+  models,
+  requestedModel,
+  defaultModel,
+}: {
+  models: ProviderModelInfo[];
+  requestedModel: string | null;
+  defaultModel: string;
+}): ProviderModelInfo | null {
+  const requestedMatch = findModelInCatalog(models, requestedModel);
+  if (requestedMatch) {
+    return requestedMatch;
+  }
+  const configuredDefault = findModelInCatalog(models, defaultModel);
+  if (configuredDefault) {
+    return configuredDefault;
+  }
+  return models.find((model) => model.isDefault) ?? models[0] ?? null;
+}
+
+function findModelInCatalog(models: ProviderModelInfo[], token: string | null): ProviderModelInfo | null {
+  const normalizedToken = normalizeString(token).toLowerCase();
+  if (!normalizedToken) {
+    return null;
+  }
+  return models.find((model) => (
+    normalizeString(model.id).toLowerCase() === normalizedToken
+    || normalizeString(model.model).toLowerCase() === normalizedToken
+    || normalizeString(model.displayName).toLowerCase() === normalizedToken
+  )) ?? null;
+}
+
+function normalizeBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((entry) => normalizeString(entry)).filter(Boolean)
+    : [];
 }
 
 function normalizeProviderLabel(value: unknown): string {

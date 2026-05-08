@@ -121,11 +121,11 @@ const KIMI_MODELS: CliproxyModelCatalogEntry[] = [
 ];
 
 const QWEN_MODELS: CliproxyModelCatalogEntry[] = [
-  model('qwen', 'coder-model', 'qwen', 'Qwen 3.6 Plus', null, {
+  model('qwen', 'qwen-plus', 'qwen', 'Qwen Plus', null, {
     maxOutputTokens: 65536,
     supportedParameters: ['temperature', 'top_p', 'max_tokens', 'stream', 'stop'],
   }),
-  model('qwen', 'qwen-plus', 'qwen', 'Qwen Plus'),
+  model('qwen', 'qwen3-coder-plus', 'qwen', 'Qwen3 Coder Plus'),
 ];
 
 const ANTIGRAVITY_MODELS: CliproxyModelCatalogEntry[] = [
