@@ -1264,6 +1264,70 @@ test('WeixinBridgeRuntime merges commentary and final-answer progress into the p
   ]);
 });
 
+test('WeixinBridgeRuntime dedupes overlapping cumulative final-answer updates in the preview stream', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '第一句。',
+          delta: '第一句。',
+          outputKind: 'final_answer',
+        });
+        await options.onProgress?.({
+          text: '第一句。\n\n第二句。',
+          delta: '第一句。\n\n第二句。',
+          outputKind: 'final_answer',
+        });
+        return completeResponse('第一句。\n\n第二句。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '第一句。' },
+    { externalScopeId: 'wxid_1', content: '第二句。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime suppresses identical repeated commentary preview deltas', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '先检查。',
+          delta: '先检查。',
+          outputKind: 'commentary',
+        });
+        await options.onProgress?.({
+          text: '先检查。',
+          delta: '先检查。',
+          outputKind: 'commentary',
+        });
+        return completeResponse('最终答案。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '先检查。' },
+    { externalScopeId: 'wxid_1', content: '最终答案。' },
+  ]);
+});
+
 test('WeixinBridgeRuntime delays a sub-500 preview block by one extra interval for long-running turns', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const runtime = makeRuntime({

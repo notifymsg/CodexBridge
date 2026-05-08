@@ -615,23 +615,33 @@ export class WeixinBridgeRuntime {
       pendingPreviewLength: streamState.pendingPreview.length,
       streamedLength: streamState.streamedText.length,
     });
+    let delta = '';
     if (progress.outputKind === 'final_answer') {
       const nextText = String(progress.text ?? '');
       if (nextText) {
-        if (streamState.lastObservedFinal && !nextText.startsWith(streamState.lastObservedFinal)) {
-          if (streamState.lastObservedFinal.startsWith(nextText)) {
+        if (streamState.lastObservedFinal) {
+          if (!nextText.startsWith(streamState.lastObservedFinal)) {
+            if (streamState.lastObservedFinal.startsWith(nextText)) {
+              return;
+            }
+            streamState.streamingDisabled = true;
+            streamState.pendingPreview = '';
+            streamState.lastObservedFinal = nextText;
             return;
           }
-          streamState.streamingDisabled = true;
-          streamState.pendingPreview = '';
-          streamState.lastObservedFinal = nextText;
-          return;
+          delta = nextText.slice(streamState.lastObservedFinal.length);
+        } else {
+          delta = String(progress.delta ?? nextText);
         }
         streamState.lastObservedFinal = nextText;
+      } else {
+        delta = String(progress.delta ?? '');
       }
+    } else {
+      delta = String(progress.delta ?? progress.text ?? '');
     }
 
-    const delta = String(progress.delta ?? progress.text ?? '');
+    delta = trimOverlappingPreviewDelta(streamState, delta);
     if (!delta) {
       return;
     }
@@ -1809,6 +1819,34 @@ function appendPreviewText(streamState: StreamState, chunk: string): void {
   streamState.streamedText = streamState.streamedText
     ? `${streamState.streamedText}\n\n${chunk}`
     : chunk;
+}
+
+function trimOverlappingPreviewDelta(streamState: StreamState, delta: string): string {
+  const incoming = String(delta ?? '');
+  if (!incoming) {
+    return '';
+  }
+  const existing = getPreviewComparisonText(streamState);
+  if (!existing) {
+    return incoming;
+  }
+  if (existing.endsWith(incoming)) {
+    return '';
+  }
+  const maxOverlap = Math.min(existing.length, incoming.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (existing.slice(-overlap) === incoming.slice(0, overlap)) {
+      return incoming.slice(overlap);
+    }
+  }
+  return incoming;
+}
+
+function getPreviewComparisonText(streamState: StreamState): string {
+  if (streamState.streamedText && streamState.pendingPreview) {
+    return `${streamState.streamedText}\n\n${streamState.pendingPreview}`;
+  }
+  return streamState.pendingPreview || streamState.streamedText || '';
 }
 
 function extractImmediatePreviewChunk(text: string, hardLimitBytes: number): string {
