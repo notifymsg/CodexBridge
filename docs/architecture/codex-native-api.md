@@ -575,6 +575,17 @@ Reason:
 `POST /v1/chat/completions` should be treated as a compatibility layer added
 after the Responses-first surface is stable.
 
+First landed compatibility slice:
+
+- it wraps the same native isolated execution substrate used by
+  `POST /v1/responses`
+- it supports single-choice text generation plus optional SSE streaming
+- it renders prior `system` / `developer` / `user` / `assistant` / `tool`
+  history into the native prompt instead of inventing a second continuation
+  mechanism
+- it intentionally keeps request-side tool declarations, parallel tool-calling,
+  and non-text output modes out of scope until a later compatibility pass
+
 ## Continuation and State Model
 
 External clients think in API request/response IDs.

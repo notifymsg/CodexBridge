@@ -44,6 +44,7 @@ export interface CodexNativeApiServerOptions {
   continuationTtlMs?: number;
   now?: () => number;
   createResponseId?: () => string;
+  createChatCompletionId?: () => string;
 }
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -83,6 +84,16 @@ interface ResponsesStreamState {
   sequence: number;
 }
 
+interface ChatCompletionsStreamState {
+  chatCompletionId: string;
+  createdAt: number;
+  responseModel: string | null;
+  emittedRole: boolean;
+  contentText: string;
+  reasoningText: string;
+  terminalEmitted: boolean;
+}
+
 export class CodexNativeApiServer {
   private readonly runtime: CodexNativeRuntime;
 
@@ -110,6 +121,8 @@ export class CodexNativeApiServer {
 
   private readonly createResponseId: () => string;
 
+  private readonly createChatCompletionId: () => string;
+
   private server: http.Server | null;
 
   private startedUrl: string | null;
@@ -129,6 +142,7 @@ export class CodexNativeApiServer {
     continuationTtlMs,
     now = () => Date.now(),
     createResponseId = () => `resp_${crypto.randomUUID()}`,
+    createChatCompletionId = () => `chatcmpl_${crypto.randomUUID()}`,
   }: CodexNativeApiServerOptions) {
     if (typeof resolveRuntimeContext !== 'function') {
       throw new Error('Codex native API server requires a runtime context resolver.');
@@ -151,6 +165,7 @@ export class CodexNativeApiServer {
       ttlMs: continuationTtlMs,
     });
     this.createResponseId = createResponseId;
+    this.createChatCompletionId = createChatCompletionId;
     this.server = null;
     this.startedUrl = null;
   }
@@ -237,6 +252,24 @@ export class CodexNativeApiServer {
       await this.handleResponses(body, response);
       return;
     }
+    if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
+      let body: unknown;
+      try {
+        body = await readJsonBody(request, this.maxBodyBytes);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = message.startsWith('Request body exceeded ') ? 413 : 400;
+        writeJson(response, status, {
+          error: {
+            message,
+            type: 'invalid_request_error',
+          },
+        });
+        return;
+      }
+      await this.handleChatCompletions(body, response);
+      return;
+    }
     if (request.method === 'POST' && url.pathname === '/v1/responses/compact') {
       writeJson(response, 501, {
         error: {
@@ -295,7 +328,9 @@ export class CodexNativeApiServer {
           compact: false,
         },
         chat_completions: {
-          create: false,
+          create: true,
+          stream: true,
+          tool_calling: false,
         },
       },
       continuation_registry: serializeContinuationRegistryDescriptor(this.continuationRegistry.describe()),
@@ -336,6 +371,164 @@ export class CodexNativeApiServer {
         }),
       },
     });
+  }
+
+  private async handleChatCompletions(body: unknown, response: ServerResponse): Promise<void> {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      writeJson(response, 400, {
+        error: {
+          message: 'Chat Completions requests require a JSON object body.',
+          type: 'invalid_request_error',
+        },
+      });
+      return;
+    }
+    const requestBody = body as JsonRecord;
+    const unsupportedFeature = detectUnsupportedChatCompletionsFeature(requestBody);
+    if (unsupportedFeature) {
+      writeJson(response, 400, {
+        error: {
+          message: unsupportedFeature.message,
+          type: 'invalid_request_error',
+          code: 'unsupported_chat_completions_feature',
+        },
+      });
+      return;
+    }
+    const responsesRequest = convertChatCompletionsRequestToResponsesRequest(requestBody);
+    const prompt = buildPromptFromResponsesRequest(responsesRequest);
+    if (!prompt) {
+      writeJson(response, 400, {
+        error: {
+          message: 'Chat Completions requests require at least one textual message or instruction.',
+          type: 'invalid_request_error',
+        },
+      });
+      return;
+    }
+    const context = await this.resolveRuntimeContext();
+    const readiness = await this.runtime.checkReadiness({
+      providerProfile: context.providerProfile,
+      providerPlugin: context.providerPlugin,
+      authPathOrOptions: context.authPathOrOptions ?? {},
+    });
+    if (!readiness.ready || !readiness.runtimeReachable || !context.providerPlugin) {
+      writeJson(response, 503, {
+        error: {
+          message: readiness.errorMessage || 'Codex native runtime is unavailable.',
+          type: 'service_unavailable_error',
+          code: 'native_runtime_unavailable',
+        },
+        native_runtime: buildRuntimeMetadata({
+          providerProfile: context.providerProfile,
+          readiness,
+        }),
+      });
+      return;
+    }
+    const chatCompletionId = this.createChatCompletionId();
+    const requestMetadata = normalizeRecord(responsesRequest.metadata);
+    const requestedModel = normalizeString(requestBody.model) || null;
+    const effectiveModel = requestedModel || this.defaultModel;
+    const locale = normalizeNullableString(requestMetadata?.locale) || this.defaultLocale;
+    const requestedCwd = normalizeNullableString(requestMetadata?.cwd);
+    const effectiveCwd = requestedCwd || this.defaultCwd;
+    const reasoningEffort = normalizeNullableString(responsesRequest.reasoning?.effort);
+    const serviceTier = normalizeNullableString(requestBody.service_tier);
+    const internalEventMetadata = extractInternalCodexbridgeEventMetadata(requestMetadata);
+    const internalThreadMetadata = extractInternalCodexbridgeThreadMetadata(requestMetadata);
+    const internalTaskClass = extractInternalCodexbridgeTaskClass(requestMetadata);
+    const startedAt = this.now();
+    const createdAt = Math.floor(startedAt / 1000);
+
+    if (Boolean(requestBody.stream)) {
+      await this.handleStreamingChatCompletions({
+        response,
+        request: requestBody,
+        chatCompletionId,
+        startedAt,
+        createdAt,
+        context,
+        readiness,
+        prompt,
+        locale,
+        requestMetadata,
+        internalEventMetadata,
+        internalThreadMetadata,
+        internalTaskClass,
+        effectiveModel,
+        effectiveCwd,
+        reasoningEffort,
+        serviceTier,
+      });
+      return;
+    }
+
+    try {
+      const execution = await this.executeResponsesTurn({
+        context,
+        continuationEntry: null,
+        responseId: chatCompletionId,
+        previousResponseId: null,
+        prompt,
+        locale,
+        requestMetadata,
+        internalEventMetadata,
+        internalThreadMetadata,
+        internalTaskClass,
+        effectiveModel,
+        effectiveCwd,
+        reasoningEffort,
+        serviceTier,
+        requestUser: normalizeNullableString(requestBody.user),
+        routePath: '/v1/chat/completions',
+      });
+      const outputText = normalizeString(execution.result.outputText);
+      const previewText = normalizeString(execution.result.previewText);
+      const effectiveText = outputText || previewText;
+      if (!effectiveText) {
+        writeJson(response, 502, {
+          error: {
+            message: normalizeString(execution.result.errorMessage) || 'Codex native runtime returned no response text.',
+            type: 'native_runtime_error',
+          },
+          native_runtime: buildRuntimeMetadata({
+            providerProfile: context.providerProfile,
+            readiness,
+            threadId: execution.result.threadId ?? execution.session.codexThreadId,
+            turnId: execution.result.turnId ?? null,
+            bridgeSessionId: execution.session.id,
+          }),
+        });
+        return;
+      }
+      writeJson(response, 200, buildChatCompletionsObject({
+        request: requestBody,
+        chatCompletionId,
+        createdAt,
+        responseModel: effectiveModel,
+        content: effectiveText,
+        finishReason: outputText ? 'stop' : 'length',
+        nativeRuntime: buildRuntimeMetadata({
+          providerProfile: context.providerProfile,
+          readiness,
+          threadId: execution.result.threadId ?? execution.session.codexThreadId,
+          turnId: execution.result.turnId ?? null,
+          bridgeSessionId: execution.session.id,
+        }),
+      }));
+    } catch (error) {
+      writeJson(response, 502, {
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          type: 'native_runtime_error',
+        },
+        native_runtime: buildRuntimeMetadata({
+          providerProfile: context.providerProfile,
+          readiness,
+        }),
+      });
+    }
   }
 
   private async handleResponses(body: unknown, response: ServerResponse): Promise<void> {
@@ -564,6 +757,7 @@ export class CodexNativeApiServer {
     requestUser = null,
     onProgress = null,
     onTurnStarted = null,
+    routePath = '/v1/responses',
   }: {
     context: CodexNativeApiRuntimeContext;
     continuationEntry: CodexNativeApiContinuationEntry | null;
@@ -582,6 +776,7 @@ export class CodexNativeApiServer {
     requestUser?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: CodexNativeRuntimeTurnStartedMeta) => Promise<void> | void) | null;
+    routePath?: string;
   }): Promise<CodexNativeRuntimeTurnResult> {
     return continuationEntry
       ? this.runtime.continueIsolatedTurn({
@@ -600,6 +795,7 @@ export class CodexNativeApiServer {
             source: 'codex-native-api',
             responseId,
             previousResponseId,
+            route: routePath,
             requestMetadata: requestMetadata ?? {},
           },
           event: {
@@ -621,7 +817,7 @@ export class CodexNativeApiServer {
         metadata: {
           ...(internalThreadMetadata ?? {}),
           source: 'codex-native-api',
-          route: '/v1/responses',
+          route: routePath,
           responseId,
           user: requestUser,
           sideTaskClass: internalTaskClass,
@@ -637,6 +833,7 @@ export class CodexNativeApiServer {
           metadata: {
             source: 'codex-native-api',
             responseId,
+            route: routePath,
             requestMetadata: requestMetadata ?? {},
           },
           event: {
@@ -816,6 +1013,152 @@ export class CodexNativeApiServer {
     }
   }
 
+  private async handleStreamingChatCompletions({
+    response,
+    request,
+    chatCompletionId,
+    startedAt: _startedAt,
+    createdAt,
+    context,
+    readiness,
+    prompt,
+    locale,
+    requestMetadata,
+    internalEventMetadata,
+    internalThreadMetadata,
+    internalTaskClass,
+    effectiveModel,
+    effectiveCwd,
+    reasoningEffort,
+    serviceTier,
+  }: {
+    response: ServerResponse;
+    request: JsonRecord;
+    chatCompletionId: string;
+    startedAt: number;
+    createdAt: number;
+    context: CodexNativeApiRuntimeContext;
+    readiness: CodexNativeRuntimeReadiness;
+    prompt: string;
+    locale: string | null;
+    requestMetadata: JsonRecord | null;
+    internalEventMetadata: JsonRecord | undefined;
+    internalThreadMetadata: JsonRecord | null;
+    internalTaskClass: string | null;
+    effectiveModel: string | null;
+    effectiveCwd: string | null;
+    reasoningEffort: string | null;
+    serviceTier: string | null;
+  }): Promise<void> {
+    const streamState = createChatCompletionsStreamState({
+      chatCompletionId,
+      createdAt,
+      responseModel: effectiveModel,
+    });
+    let latestTurnMeta: {
+      threadId: string | null;
+      turnId: string | null;
+      bridgeSessionId: string | null;
+    } = {
+      threadId: null,
+      turnId: null,
+      bridgeSessionId: null,
+    };
+
+    startSse(response);
+    const flushChunks = (payloads: JsonRecord[]) => {
+      for (const payload of payloads) {
+        writeSseData(response, payload);
+      }
+    };
+
+    try {
+      const execution = await this.executeResponsesTurn({
+        context,
+        continuationEntry: null,
+        responseId: chatCompletionId,
+        previousResponseId: null,
+        prompt,
+        locale,
+        requestMetadata,
+        internalEventMetadata,
+        internalThreadMetadata,
+        internalTaskClass,
+        effectiveModel,
+        effectiveCwd,
+        reasoningEffort,
+        serviceTier,
+        requestUser: normalizeNullableString(request.user),
+        routePath: '/v1/chat/completions',
+        onTurnStarted: (meta) => {
+          latestTurnMeta = {
+            threadId: meta.threadId,
+            turnId: meta.turnId,
+            bridgeSessionId: meta.bridgeSessionId,
+          };
+        },
+        onProgress: (progress) => {
+          const delta = rawString(progress.delta);
+          if (!delta) {
+            return;
+          }
+          const nativeRuntime = buildRuntimeMetadata({
+            providerProfile: context.providerProfile,
+            readiness,
+            threadId: latestTurnMeta.threadId,
+            turnId: latestTurnMeta.turnId,
+            bridgeSessionId: latestTurnMeta.bridgeSessionId,
+          });
+          flushChunks(
+            normalizeString(progress.outputKind) === 'final_answer'
+              ? appendChatCompletionsContentDelta(streamState, delta, nativeRuntime)
+              : appendChatCompletionsReasoningDelta(streamState, delta, nativeRuntime),
+          );
+        },
+      });
+      const outputText = rawString(execution.result.outputText);
+      const previewText = rawString(execution.result.previewText);
+      const effectiveText = outputText || previewText;
+      const nativeRuntime = buildRuntimeMetadata({
+        providerProfile: context.providerProfile,
+        readiness,
+        threadId: execution.result.threadId ?? execution.session.codexThreadId,
+        turnId: execution.result.turnId ?? latestTurnMeta.turnId,
+        bridgeSessionId: execution.session.id,
+      });
+      if (!effectiveText) {
+        writeSseData(response, buildChatCompletionsStreamErrorChunk({
+          streamState,
+          message: normalizeString(execution.result.errorMessage) || 'Codex native runtime returned no response text.',
+          nativeRuntime,
+        }));
+        finishSse(response);
+        return;
+      }
+      flushChunks(syncChatCompletionsStreamContentToTerminalText(streamState, effectiveText, nativeRuntime));
+      writeSseData(response, buildChatCompletionsStreamFinishChunk({
+        streamState,
+        finishReason: outputText ? 'stop' : 'length',
+        nativeRuntime,
+      }));
+      finishSse(response);
+    } catch (error) {
+      const nativeRuntime = buildRuntimeMetadata({
+        providerProfile: context.providerProfile,
+        readiness,
+        threadId: latestTurnMeta.threadId,
+        turnId: latestTurnMeta.turnId,
+        bridgeSessionId: latestTurnMeta.bridgeSessionId,
+      });
+      writeSseData(response, buildChatCompletionsStreamErrorChunk({
+        streamState,
+        message: error instanceof Error ? error.message : String(error),
+        nativeRuntime,
+      }));
+      finishSse(response);
+    }
+  }
+
   private async inspectModels(
     context: CodexNativeApiRuntimeContext,
   ): Promise<{
@@ -943,6 +1286,105 @@ function buildPromptFromResponsesRequest(request: JsonRecord): string {
   return sections.join('\n\n').trim();
 }
 
+function detectUnsupportedChatCompletionsFeature(
+  request: JsonRecord,
+): {
+  message: string;
+} | null {
+  const choiceCount = normalizeNumber(request.n);
+  if (choiceCount !== null && choiceCount !== 1) {
+    return {
+      message: 'The first native /v1/chat/completions slice only supports n=1.',
+    };
+  }
+  if (Array.isArray(request.tools) && request.tools.length > 0) {
+    return {
+      message: 'The first native /v1/chat/completions slice does not support tool declarations yet.',
+    };
+  }
+  const toolChoice = request.tool_choice;
+  if (toolChoice !== undefined && toolChoice !== null && toolChoice !== 'none') {
+    return {
+      message: 'The first native /v1/chat/completions slice does not support tool_choice yet.',
+    };
+  }
+  if (request.parallel_tool_calls !== undefined) {
+    return {
+      message: 'The first native /v1/chat/completions slice does not support parallel_tool_calls yet.',
+    };
+  }
+  if (request.response_format !== undefined && request.response_format !== null) {
+    return {
+      message: 'The first native /v1/chat/completions slice only supports text output.',
+    };
+  }
+  return null;
+}
+
+function convertChatCompletionsRequestToResponsesRequest(request: JsonRecord): JsonRecord {
+  const instructions: string[] = [];
+  const inputItems: JsonRecord[] = [];
+  for (const message of normalizeArray(request.messages)) {
+    const role = normalizeString(message?.role) || 'user';
+    if (role === 'system' || role === 'developer') {
+      const content = renderChatCompletionsMessageContent(message?.content);
+      if (content) {
+        instructions.push(content);
+      }
+      continue;
+    }
+    if (role === 'tool' || role === 'function') {
+      const output = renderChatCompletionsMessageContent(message?.content);
+      if (output) {
+        inputItems.push({
+          type: 'function_call_output',
+          call_id: normalizeString(message?.tool_call_id) || normalizeString(message?.name) || 'tool_call',
+          output,
+        });
+      }
+      continue;
+    }
+    const content = normalizeChatCompletionsMessageContent(message?.content);
+    if (content) {
+      inputItems.push({
+        type: 'message',
+        role,
+        content,
+      });
+    }
+    if (role === 'assistant') {
+      for (const toolCall of normalizeArray(message?.tool_calls)) {
+        const name = normalizeString(toolCall?.function?.name);
+        const args = normalizeString(toolCall?.function?.arguments) || '{}';
+        if (!name) {
+          continue;
+        }
+        inputItems.push({
+          type: 'function_call',
+          call_id: normalizeString(toolCall?.id) || `call_${crypto.randomUUID()}`,
+          name,
+          arguments: args,
+        });
+      }
+    }
+  }
+  const reasoningEffort = normalizeNullableString(request.reasoning?.effort)
+    || normalizeNullableString(request.reasoning_effort);
+  return omitUndefined({
+    instructions: instructions.join('\n\n').trim() || undefined,
+    input: inputItems,
+    model: request.model ?? null,
+    stream: request.stream ?? false,
+    max_output_tokens: request.max_completion_tokens ?? request.max_tokens ?? null,
+    temperature: request.temperature,
+    top_p: request.top_p,
+    user: request.user ?? null,
+    service_tier: request.service_tier ?? null,
+    metadata: request.metadata ?? null,
+    reasoning: reasoningEffort ? { effort: reasoningEffort } : request.reasoning ?? null,
+  });
+}
+
 function renderResponsesInput(input: unknown): string {
   if (typeof input === 'string') {
     return normalizeString(input);
@@ -1020,6 +1462,69 @@ function renderResponsesContentPart(part: unknown): string {
   return '';
 }
 
+function normalizeChatCompletionsMessageContent(content: unknown): string | JsonRecord[] {
+  if (typeof content === 'string') {
+    const text = normalizeString(content);
+    return text || '';
+  }
+  const parts = normalizeArray(content)
+    .map((part) => normalizeChatCompletionsContentPart(part))
+    .filter(Boolean) as JsonRecord[];
+  return parts.length > 0 ? parts : '';
+}
+
+function normalizeChatCompletionsContentPart(part: unknown): JsonRecord | null {
+  if (!part || typeof part !== 'object') {
+    return null;
+  }
+  const candidate = part as JsonRecord;
+  const type = normalizeString(candidate.type);
+  if (!type && typeof candidate.text === 'string') {
+    return {
+      type: 'text',
+      text: normalizeString(candidate.text),
+    };
+  }
+  if (type === 'text' || type === 'input_text' || type === 'output_text') {
+    const text = normalizeString(candidate.text);
+    return text
+      ? {
+        type: 'text',
+        text,
+      }
+      : null;
+  }
+  if (type === 'image_url' || type === 'input_image') {
+    const imageUrl = normalizeString(candidate.image_url)
+      || normalizeString(candidate.image_url?.url);
+    return imageUrl
+      ? {
+        type: 'image_url',
+        image_url: imageUrl,
+      }
+      : {
+        type: 'image_url',
+      };
+  }
+  if (type === 'file' || type === 'input_file') {
+    const filename = normalizeString(candidate.filename)
+      || normalizeString(candidate.file?.filename)
+      || normalizeString(candidate.file_id)
+      || normalizeString(candidate.file?.file_id)
+      || 'file';
+    return {
+      type: 'file',
+      filename,
+    };
+  }
+  return null;
+}
+
+function renderChatCompletionsMessageContent(content: unknown): string {
+  const normalized = normalizeChatCompletionsMessageContent(content);
+  return renderResponsesContent(normalized);
+}
+
 function buildResponsesObject({
   request,
   responseId,
@@ -1094,6 +1599,60 @@ function buildResponsesObject({
   });
 }
 
+function buildChatCompletionsObject({
+  request,
+  chatCompletionId,
+  createdAt,
+  responseModel,
+  content,
+  finishReason,
+  nativeRuntime,
+}: {
+  request: JsonRecord;
+  chatCompletionId: string;
+  createdAt: number;
+  responseModel: string | null;
+  content: string;
+  finishReason: string;
+  nativeRuntime: JsonRecord;
+}): JsonRecord {
+  return omitUndefined({
+    id: chatCompletionId,
+    object: 'chat.completion',
+    created: createdAt,
+    model: request.model ?? responseModel ?? null,
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content,
+      },
+      finish_reason: finishReason,
+    }],
+    native_runtime: nativeRuntime,
+  });
+}
+
+function createChatCompletionsStreamState({
+  chatCompletionId,
+  createdAt,
+  responseModel,
+}: {
+  chatCompletionId: string;
+  createdAt: number;
+  responseModel: string | null;
+}): ChatCompletionsStreamState {
+  return {
+    chatCompletionId,
+    createdAt,
+    responseModel,
+    emittedRole: false,
+    contentText: '',
+    reasoningText: '',
+    terminalEmitted: false,
+  };
+}
+
 function createResponsesStreamState({
   request,
   responseId,
@@ -1120,6 +1679,148 @@ function createResponsesStreamState({
     terminalEmitted: false,
     nextOutputIndex: 0,
     sequence: 0,
+  };
+}
+
+function buildChatCompletionsStreamChunk({
+  streamState,
+  delta,
+  finishReason = null,
+  nativeRuntime = null,
+}: {
+  streamState: ChatCompletionsStreamState;
+  delta: JsonRecord;
+  finishReason?: string | null;
+  nativeRuntime?: JsonRecord | null;
+}): JsonRecord {
+  return omitUndefined({
+    id: streamState.chatCompletionId,
+    object: 'chat.completion.chunk',
+    created: streamState.createdAt,
+    model: streamState.responseModel,
+    choices: [{
+      index: 0,
+      delta,
+      finish_reason: finishReason,
+    }],
+    native_runtime: nativeRuntime ?? undefined,
+  });
+}
+
+function ensureChatCompletionsStreamRole(
+  streamState: ChatCompletionsStreamState,
+  nativeRuntime: JsonRecord,
+): JsonRecord[] {
+  if (streamState.emittedRole) {
+    return [];
+  }
+  streamState.emittedRole = true;
+  return [buildChatCompletionsStreamChunk({
+    streamState,
+    delta: {
+      role: 'assistant',
+    },
+    nativeRuntime,
+  })];
+}
+
+function appendChatCompletionsReasoningDelta(
+  streamState: ChatCompletionsStreamState,
+  delta: string,
+  nativeRuntime: JsonRecord,
+): JsonRecord[] {
+  if (!delta) {
+    return [];
+  }
+  streamState.reasoningText += delta;
+  return [
+    ...ensureChatCompletionsStreamRole(streamState, nativeRuntime),
+    buildChatCompletionsStreamChunk({
+      streamState,
+      delta: {
+        reasoning_content: delta,
+      },
+      nativeRuntime,
+    }),
+  ];
+}
+
+function appendChatCompletionsContentDelta(
+  streamState: ChatCompletionsStreamState,
+  delta: string,
+  nativeRuntime: JsonRecord,
+): JsonRecord[] {
+  if (!delta) {
+    return [];
+  }
+  streamState.contentText += delta;
+  return [
+    ...ensureChatCompletionsStreamRole(streamState, nativeRuntime),
+    buildChatCompletionsStreamChunk({
+      streamState,
+      delta: {
+        content: delta,
+      },
+      nativeRuntime,
+    }),
+  ];
+}
+
+function syncChatCompletionsStreamContentToTerminalText(
+  streamState: ChatCompletionsStreamState,
+  text: string,
+  nativeRuntime: JsonRecord,
+): JsonRecord[] {
+  if (!text) {
+    return [];
+  }
+  if (!streamState.contentText) {
+    return appendChatCompletionsContentDelta(streamState, text, nativeRuntime);
+  }
+  if (text.startsWith(streamState.contentText)) {
+    return appendChatCompletionsContentDelta(
+      streamState,
+      text.slice(streamState.contentText.length),
+      nativeRuntime,
+    );
+  }
+  return [];
+}
+
+function buildChatCompletionsStreamFinishChunk({
+  streamState,
+  finishReason,
+  nativeRuntime,
+}: {
+  streamState: ChatCompletionsStreamState;
+  finishReason: string;
+  nativeRuntime: JsonRecord;
+}): JsonRecord {
+  streamState.terminalEmitted = true;
+  return buildChatCompletionsStreamChunk({
+    streamState,
+    delta: {},
+    finishReason,
+    nativeRuntime,
+  });
+}
+
+function buildChatCompletionsStreamErrorChunk({
+  streamState,
+  message,
+  nativeRuntime,
+}: {
+  streamState: ChatCompletionsStreamState;
+  message: string;
+  nativeRuntime: JsonRecord;
+}): JsonRecord {
+  streamState.terminalEmitted = true;
+  return {
+    error: {
+      message,
+      type: 'native_runtime_error',
+    },
+    native_runtime: nativeRuntime,
   };
 }
 
@@ -1607,6 +2308,13 @@ function writeSseEvent(response: ServerResponse, payload: JsonRecord): void {
   response.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
+function writeSseData(response: ServerResponse, payload: JsonRecord): void {
+  if (response.writableEnded || response.destroyed) {
+    return;
+  }
+  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
 function finishSse(response: ServerResponse): void {
   if (response.writableEnded || response.destroyed) {
     return;
@@ -1632,6 +2340,17 @@ function normalizeString(value: unknown): string {
 function normalizeNullableString(value: unknown): string | null {
   const normalized = normalizeString(value);
   return normalized || null;
+}
+
+function normalizeNumber(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeArray(value: unknown): any[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function normalizeRecord(value: unknown): JsonRecord | null {

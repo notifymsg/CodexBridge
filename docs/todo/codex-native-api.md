@@ -463,10 +463,12 @@ Implementation checklist:
   - `src/providers/codex/native_api_server.ts` now serves SSE for
     `POST /v1/responses` when `stream: true`, while keeping
     `POST /v1/responses/compact` unsupported
-- [ ] Decide the first compatibility slice beyond Responses-first:
-  - likely `POST /v1/chat/completions`
-  - keep `POST /v1/responses/compact` explicitly unsupported until that
-    compatibility/hardening work justifies a second response shape
+- [x] Decide the first compatibility slice beyond Responses-first:
+  - landed slice: `POST /v1/chat/completions`
+  - scope: single-choice text generation, prompt-history rendering, and
+    optional SSE streaming over the same native isolated runtime substrate
+  - keep `POST /v1/responses/compact` explicitly unsupported until a later
+    compatibility/hardening pass justifies a second response shape
 
 ## Routing Priority
 
@@ -632,9 +634,26 @@ Only after:
 
 ### Phase 3: Chat compatibility
 
-- [ ] Expose `POST /v1/chat/completions`
-- [ ] Define how tool calling should map, if supported
-- [ ] Decide which features intentionally stay Responses-only
+- [x] Expose `POST /v1/chat/completions`
+  - `src/providers/codex/native_api_server.ts` now exposes a compatibility
+    wrapper over the same native isolated execution substrate used by
+    `POST /v1/responses`
+  - the first slice supports non-streaming and `stream: true` SSE output
+- [x] Define how tool calling should map, if supported
+  - decision: keep request-side tool declarations unsupported in the first
+    compatibility slice instead of inventing partial tool-execution semantics
+  - request bodies with `tools`, `tool_choice` (except `none`), or
+    `parallel_tool_calls` now fail fast with
+    `unsupported_chat_completions_feature`
+  - prior assistant `tool_calls` and `tool` / `function` messages may still be
+    rendered into the native prompt as compatibility history
+- [x] Decide which features intentionally stay Responses-only
+  - first compatibility slice is intentionally `n=1`, text-only, and
+    single-response
+  - structured output modes via `response_format` remain Responses-only for now
+  - continuation registry semantics remain a Responses-first concern; chat
+    clients continue by resending message history instead of reusing
+    `previous_response_id`
 
 ### Phase 4: Hardening
 

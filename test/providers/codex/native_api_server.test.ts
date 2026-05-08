@@ -32,6 +32,22 @@ function parseSseText(text: string): Array<{ event: string; data: any }> {
   return parsed;
 }
 
+function parseSseDataText(text: string): any[] {
+  const blocks = text.split('\n\n').map((entry) => entry.trim()).filter(Boolean);
+  const parsed: any[] = [];
+  for (const block of blocks) {
+    if (block === 'data: [DONE]') {
+      continue;
+    }
+    const dataLine = block.split('\n').find((line) => line.startsWith('data: '));
+    if (!dataLine) {
+      continue;
+    }
+    parsed.push(JSON.parse(dataLine.slice(6)));
+  }
+  return parsed;
+}
+
 test('CodexNativeApiServer exposes /v1/models with runtime metadata', async () => {
   const runtime = new CodexNativeRuntime({
     now: () => 111,
@@ -146,12 +162,271 @@ test('CodexNativeApiServer exposes /v1/health with request-scoped readiness and 
     assert.equal(body.route_capabilities.responses.continuation, true);
     assert.equal(body.route_capabilities.responses.stream, true);
     assert.equal(body.route_capabilities.responses.compact, false);
-    assert.equal(body.route_capabilities.chat_completions.create, false);
+    assert.equal(body.route_capabilities.chat_completions.create, true);
+    assert.equal(body.route_capabilities.chat_completions.stream, true);
+    assert.equal(body.route_capabilities.chat_completions.tool_calling, false);
     assert.equal(body.continuation_registry.kind, 'in_memory');
     assert.equal(body.continuation_registry.persistence, 'in_process');
     assert.equal(body.native_runtime.ready, true);
     assert.equal(body.native_runtime.provider_profile_id, 'openai-default');
     assert.equal(body.native_runtime.account_identity.account_id, 'acc_native');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CodexNativeApiServer exposes /v1/chat/completions through the isolated native runtime', async () => {
+  const calls: Array<{ kind: string; payload: any }> = [];
+  const runtime = new CodexNativeRuntime({
+    now: () => 707_000,
+    createSessionId: () => 'session-native-chat-1',
+    readAccountIdentity: () => ({
+      email: 'native@example.com',
+      name: 'Native Runtime',
+      authMode: 'chatgpt',
+      accountId: 'acc_native',
+      plan: 'plus',
+      authPath: '/tmp/auth.json',
+    }),
+  });
+  const providerPlugin = {
+    async listModels() {
+      return [{
+        id: 'gpt-5.5',
+        model: 'gpt-5.5',
+        displayName: 'GPT-5.5',
+        description: 'Newest coding model.',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium', 'high'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+    async startThread(params: any) {
+      calls.push({ kind: 'startThread', payload: params });
+      return {
+        threadId: 'thread-native-chat-1',
+        cwd: params.cwd,
+        title: params.title,
+      };
+    },
+    async startTurn(params: any) {
+      calls.push({ kind: 'startTurn', payload: params });
+      return {
+        outputText: 'compat answer',
+        previewText: '',
+        threadId: params.bridgeSession.codexThreadId,
+        turnId: 'turn-native-chat-1',
+      };
+    },
+  } as any;
+  const server = new CodexNativeApiServer({
+    runtime,
+    resolveRuntimeContext: () => ({
+      providerProfile: makeProfile(),
+      providerPlugin,
+    }),
+    defaultCwd: '/workspace/default',
+    defaultLocale: 'zh-CN',
+    createChatCompletionId: () => 'chatcmpl_native_1',
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.5',
+        messages: [
+          { role: 'system', content: 'Be terse.' },
+          { role: 'user', content: 'Explain the test.' },
+        ],
+        reasoning_effort: 'high',
+        metadata: {
+          cwd: '/tmp/chat-project',
+          locale: 'en-US',
+          ticket: 'NATIVE-CHAT-1',
+        },
+      }),
+    });
+    const body = await response.json() as any;
+    assert.equal(response.status, 200);
+    assert.equal(body.id, 'chatcmpl_native_1');
+    assert.equal(body.object, 'chat.completion');
+    assert.equal(body.model, 'gpt-5.5');
+    assert.equal(body.choices[0].message.role, 'assistant');
+    assert.equal(body.choices[0].message.content, 'compat answer');
+    assert.equal(body.choices[0].finish_reason, 'stop');
+    assert.equal(body.native_runtime.thread_id, 'thread-native-chat-1');
+    assert.equal(body.native_runtime.turn_id, 'turn-native-chat-1');
+    assert.equal(body.native_runtime.bridge_session_id, 'session-native-chat-1');
+
+    assert.equal(calls[0]?.kind, 'startThread');
+    assert.equal(calls[0]?.payload.metadata.route, '/v1/chat/completions');
+    assert.equal(calls[0]?.payload.metadata.source, 'codex-native-api');
+    assert.equal(calls[1]?.kind, 'startTurn');
+    assert.equal(calls[1]?.payload.sessionSettings.model, 'gpt-5.5');
+    assert.equal(calls[1]?.payload.sessionSettings.reasoningEffort, 'high');
+    assert.equal(calls[1]?.payload.sessionSettings.locale, 'en-US');
+    assert.equal(calls[1]?.payload.sessionSettings.metadata.route, '/v1/chat/completions');
+    assert.equal(calls[1]?.payload.sessionSettings.metadata.requestMetadata.ticket, 'NATIVE-CHAT-1');
+    assert.match(calls[1]?.payload.inputText, /System instructions:\nBe terse\./);
+    assert.match(calls[1]?.payload.inputText, /Conversation input:\nUSER:\nExplain the test\./);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CodexNativeApiServer streams /v1/chat/completions as compatibility chunks over native progress', async () => {
+  const runtime = new CodexNativeRuntime({
+    now: () => 808_000,
+    createSessionId: () => 'session-native-chat-stream-1',
+    readAccountIdentity: () => ({
+      email: 'native@example.com',
+      name: 'Native Runtime',
+      authMode: 'chatgpt',
+      accountId: 'acc_native',
+      plan: 'plus',
+      authPath: '/tmp/auth.json',
+    }),
+  });
+  const providerPlugin = {
+    async listModels() {
+      return [{
+        id: 'gpt-5.5',
+        model: 'gpt-5.5',
+        displayName: 'GPT-5.5',
+        description: 'Newest coding model.',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium', 'high'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+    async startThread(params: any) {
+      return {
+        threadId: 'thread-native-chat-stream-1',
+        cwd: params.cwd,
+        title: params.title,
+      };
+    },
+    async startTurn(params: any) {
+      await params.onTurnStarted?.({
+        threadId: params.bridgeSession.codexThreadId,
+        turnId: 'turn-native-chat-stream-1',
+      });
+      await params.onProgress?.({
+        text: 'plan',
+        delta: 'plan',
+        outputKind: 'commentary',
+      });
+      await params.onProgress?.({
+        text: 'Final ',
+        delta: 'Final ',
+        outputKind: 'final_answer',
+      });
+      await params.onProgress?.({
+        text: 'Final answer.',
+        delta: 'answer.',
+        outputKind: 'final_answer',
+      });
+      return {
+        outputText: 'Final answer.',
+        previewText: '',
+        threadId: params.bridgeSession.codexThreadId,
+        turnId: 'turn-native-chat-stream-1',
+      };
+    },
+  } as any;
+  const server = new CodexNativeApiServer({
+    runtime,
+    resolveRuntimeContext: () => ({
+      providerProfile: makeProfile(),
+      providerPlugin,
+    }),
+    createChatCompletionId: () => 'chatcmpl_native_stream_1',
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.5',
+        stream: true,
+        messages: [
+          { role: 'user', content: 'Stream this response' },
+        ],
+      }),
+    });
+    const text = await response.text();
+    const chunks = parseSseDataText(text);
+
+    assert.equal(response.status, 200);
+    assert.match(text, /data: \[DONE\]/);
+    assert.equal(chunks[0].object, 'chat.completion.chunk');
+    assert.equal(chunks[0].choices[0].delta.role, 'assistant');
+    assert.equal(chunks[1].choices[0].delta.reasoning_content, 'plan');
+    assert.equal(chunks[2].choices[0].delta.content, 'Final ');
+    assert.equal(chunks[3].choices[0].delta.content, 'answer.');
+    assert.equal(chunks.at(-1)?.choices[0].finish_reason, 'stop');
+    assert.equal(chunks.at(-1)?.native_runtime.thread_id, 'thread-native-chat-stream-1');
+    assert.equal(chunks.at(-1)?.native_runtime.turn_id, 'turn-native-chat-stream-1');
+    assert.equal(chunks.at(-1)?.native_runtime.bridge_session_id, 'session-native-chat-stream-1');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CodexNativeApiServer rejects unsupported chat-completions tool declarations', async () => {
+  const server = new CodexNativeApiServer({
+    resolveRuntimeContext: () => {
+      throw new Error('resolver should not run');
+    },
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'lookup',
+            parameters: { type: 'object' },
+          },
+        }],
+      }),
+    });
+    const body = await response.json() as any;
+    assert.equal(response.status, 400);
+    assert.equal(body.error.code, 'unsupported_chat_completions_feature');
+    assert.match(body.error.message, /tool declarations/i);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CodexNativeApiServer rejects chat-completions requests with n > 1', async () => {
+  const server = new CodexNativeApiServer({
+    resolveRuntimeContext: () => {
+      throw new Error('resolver should not run');
+    },
+  });
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        n: 2,
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    const body = await response.json() as any;
+    assert.equal(response.status, 400);
+    assert.equal(body.error.code, 'unsupported_chat_completions_feature');
+    assert.match(body.error.message, /n=1/i);
   } finally {
     await server.stop();
   }
