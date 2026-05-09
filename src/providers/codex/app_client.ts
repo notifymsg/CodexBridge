@@ -25,6 +25,7 @@ import type {
   ProviderSkillToolDependency,
   ProviderUsageReport,
   ProviderThreadListResult,
+  ProviderThreadGoal,
   ProviderThreadStartResult,
   ProviderThreadSummary,
   ProviderTurnProgress,
@@ -546,6 +547,54 @@ export class CodexAppClient extends EventEmitter {
       experimentalRawEvents: true,
       persistExtendedHistory: false,
     }, { timeoutMs: 30_000 });
+  }
+
+  async getThreadGoal(threadId: string): Promise<ProviderThreadGoal | null> {
+    const result: any = await this.request('thread/goal/get', {
+      threadId,
+    }, { timeoutMs: 10_000 });
+    return mapThreadGoal(result?.goal ?? null);
+  }
+
+  async setThreadGoal({
+    threadId,
+    objective = null,
+    status = null,
+    suppressAutoTurn = false,
+  }: {
+    threadId: string;
+    objective?: string | null;
+    status?: string | null;
+    suppressAutoTurn?: boolean;
+  }): Promise<ProviderThreadGoal | null> {
+    const autoStartedTurnPromise = suppressAutoTurn
+      ? this.captureNextTurnStartedForThread(threadId, 750)
+      : Promise.resolve(null);
+    const result: any = await this.request('thread/goal/set', {
+      threadId,
+      objective,
+      status,
+    }, { timeoutMs: 15_000 });
+    const autoStartedTurnId = await autoStartedTurnPromise;
+    if (suppressAutoTurn && autoStartedTurnId) {
+      try {
+        await this.interruptTurn({ threadId, turnId: autoStartedTurnId });
+      } catch (error) {
+        this.logDebug('thread_goal_auto_turn_interrupt_failed', {
+          threadId,
+          turnId: autoStartedTurnId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return mapThreadGoal(result?.goal ?? null);
+  }
+
+  async clearThreadGoal(threadId: string): Promise<boolean> {
+    const result: any = await this.request('thread/goal/clear', {
+      threadId,
+    }, { timeoutMs: 15_000 });
+    return result?.cleared === true;
   }
 
   async startTurn({
@@ -1194,6 +1243,32 @@ export class CodexAppClient extends EventEmitter {
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  captureNextTurnStartedForThread(threadId: string, timeoutMs: number): Promise<string | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (turnId: string | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.off('notification', onNotification);
+        resolve(turnId);
+      };
+      const onNotification = (message: any) => {
+        if (String(message?.method ?? '') !== 'turn/started') {
+          return;
+        }
+        if (extractThreadIdFromNotification(message) !== threadId) {
+          return;
+        }
+        finish(extractNotificationTurnId(message?.params ?? null));
+      };
+      const timer = setTimeout(() => finish(null), Math.max(100, timeoutMs));
+      this.on('notification', onNotification);
+    });
   }
 
   getApprovedExecutions({
@@ -2288,10 +2363,18 @@ function summarizeTurnInput(input: CodexTurnInput[]) {
 
 function summarizeRpcParams(method: string, params: any) {
   switch (method) {
+    case 'thread/goal/get':
+    case 'thread/goal/clear':
     case 'thread/archive':
     case 'thread/unarchive':
       return {
         threadId: String(params?.threadId ?? ''),
+      };
+    case 'thread/goal/set':
+      return {
+        threadId: String(params?.threadId ?? ''),
+        objective: typeof params?.objective === 'string' ? params.objective : null,
+        status: typeof params?.status === 'string' ? params.status : null,
       };
     case 'thread/read':
       return {
@@ -2332,6 +2415,13 @@ function summarizeRpcParams(method: string, params: any) {
 
 function summarizeRpcResult(method: string, result: any) {
   switch (method) {
+    case 'thread/goal/get':
+    case 'thread/goal/set':
+      return mapThreadGoal(result?.goal ?? null);
+    case 'thread/goal/clear':
+      return {
+        cleared: result?.cleared === true,
+      };
     case 'thread/archive':
       return {};
     case 'thread/unarchive':
@@ -2379,6 +2469,26 @@ function summarizeThreadReadResult(thread: any) {
     path: typeof thread?.path === 'string' ? thread.path : null,
     turnCount: turns.length,
     turns: turns.slice(-3).map((turn) => summarizeTurnSnapshot(turn)),
+  };
+}
+
+function mapThreadGoal(raw: any): ProviderThreadGoal | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const objective = typeof raw.objective === 'string' ? raw.objective.trim() : '';
+  if (!objective) {
+    return null;
+  }
+  return {
+    threadId: String(raw.threadId ?? raw.thread_id ?? ''),
+    objective,
+    status: typeof raw.status === 'string' ? raw.status : 'active',
+    tokenBudget: Number.isFinite(raw.tokenBudget) ? Number(raw.tokenBudget) : null,
+    tokensUsed: Number.isFinite(raw.tokensUsed) ? Number(raw.tokensUsed) : null,
+    timeUsedSeconds: Number.isFinite(raw.timeUsedSeconds) ? Number(raw.timeUsedSeconds) : null,
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : null,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
   };
 }
 

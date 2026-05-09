@@ -66,6 +66,7 @@ class FakeProviderPlugin {
   clock: number;
   threads: Map<any, any>;
   archivedThreadIds: Set<any>;
+  threadGoals: Map<any, any>;
 
   constructor(kind: string, options: { replyPrefix?: string; models?: any[] } = {}) {
     const { replyPrefix = '', models = null } = options;
@@ -185,6 +186,7 @@ class FakeProviderPlugin {
     this.clock = 0;
     this.threads = new Map();
     this.archivedThreadIds = new Set();
+    this.threadGoals = new Map();
   }
 
   nextUpdatedAt() {
@@ -264,6 +266,41 @@ class FakeProviderPlugin {
       return restored;
     }
     return this.threads.get(threadId) ?? null;
+  }
+
+  async getThreadGoal({ threadId }) {
+    const current = this.threadGoals.get(threadId) ?? null;
+    return current ? { ...current } : null;
+  }
+
+  async setThreadGoal({ threadId, objective = null, status = null }) {
+    if (!this.threads.has(threadId)) {
+      throw new Error(`thread not found: ${threadId}`);
+    }
+    const current = this.threadGoals.get(threadId) ?? null;
+    const nextObjective = typeof objective === 'string' && objective.trim()
+      ? objective.trim()
+      : current?.objective ?? '';
+    if (!nextObjective) {
+      throw new Error('missing goal objective');
+    }
+    const next = {
+      threadId,
+      objective: nextObjective,
+      status: typeof status === 'string' && status.trim() ? status.trim() : 'active',
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: current?.createdAt ?? new Date(this.nextUpdatedAt()).toISOString(),
+      updatedAt: new Date(this.nextUpdatedAt()).toISOString(),
+    };
+    this.threadGoals.set(threadId, next);
+    return { ...next };
+  }
+
+  async clearThreadGoal({ threadId }) {
+    this.threadGoals.delete(threadId);
+    return true;
   }
 
   async archiveThread({ threadId }) {
@@ -600,43 +637,6 @@ function makeFakeCodexExperimentalFeaturesManager(initialFeatures = []) {
       if (current) {
         current.enabled = false;
       }
-    },
-  };
-}
-
-function makeFakeCodexGoalManager(initialGoal = '') {
-  const state = {
-    goal: String(initialGoal ?? '').trim(),
-  };
-  const calls: Array<{ kind: string; goal?: string | null }> = [];
-  return {
-    state,
-    calls,
-    async readGoal() {
-      calls.push({ kind: 'read' });
-      return {
-        path: '/tmp/codex-goal.txt',
-        goal: state.goal,
-        exists: Boolean(state.goal),
-      };
-    },
-    async writeGoal(goal: string) {
-      state.goal = String(goal ?? '').trim();
-      calls.push({ kind: 'write', goal: state.goal });
-      return {
-        path: '/tmp/codex-goal.txt',
-        goal: state.goal,
-        exists: Boolean(state.goal),
-      };
-    },
-    async clearGoal() {
-      state.goal = '';
-      calls.push({ kind: 'clear' });
-      return {
-        path: '/tmp/codex-goal.txt',
-        goal: '',
-        exists: false,
-      };
     },
   };
 }
@@ -4785,7 +4785,7 @@ test('/experimental reads and updates official global Codex feature flags', asyn
   ]);
 });
 
-test('/goal stays hidden until goals is enabled and then manages a global persistent goal', async () => {
+test('/goal stays hidden until goals is enabled and then manages the native goal on the current bound thread', async () => {
   const codexExperimentalFeaturesManager = makeFakeCodexExperimentalFeaturesManager([
     { name: 'terminal_resize_reflow', maturity: 'experimental', enabled: true },
     { name: 'memories', maturity: 'experimental', enabled: false },
@@ -4793,10 +4793,8 @@ test('/goal stays hidden until goals is enabled and then manages a global persis
     { name: 'goals', maturity: 'experimental', enabled: false },
     { name: 'prevent_idle_sleep', maturity: 'experimental', enabled: false },
   ]);
-  const codexGoalManager = makeFakeCodexGoalManager('');
   const { runtime, openai } = makeRuntime({
     codexExperimentalFeaturesManager,
-    codexGoalManager,
   });
 
   const hiddenCatalog = await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -4826,23 +4824,46 @@ test('/goal stays hidden until goals is enabled and then manages a global persis
     text: '/helps',
   });
   const visibleText = visibleCatalog.messages.map((message) => message.text ?? '').join('\n');
-  assert.match(visibleText, /\/goal 设置或查看官方 goals 实验功能对应的全局目标/);
+  assert.match(visibleText, /\/goal 设置或查看当前绑定 Codex 线程的原生 goals 目标/);
+
+  const missingThread = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+    text: '/goal',
+  });
+  assert.equal(missingThread.messages[0]?.text ?? '', '当前作用域还没有绑定 Codex 持久线程。');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+    text: '/new',
+  });
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+  });
+  assert.ok(session);
 
   const emptyGoal = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-goal-1',
     text: '/goal',
   });
-  assert.equal(emptyGoal.messages[0]?.text ?? '', 'Codex 全局目标');
-  assert.equal(emptyGoal.messages[2]?.text ?? '', '当前还没有设置全局目标。');
+  assert.equal(emptyGoal.messages[0]?.text ?? '', 'Codex 当前线程目标');
+  assert.equal(emptyGoal.messages[2]?.text ?? '', `当前线程：${session?.codexThreadId}`);
+  assert.equal(emptyGoal.messages[3]?.text ?? '', '当前线程还没有设置目标。');
 
   const saved = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-goal-1',
     text: '/goal 持续把 CodexBridge 的微信体验打磨到更稳定',
   });
-  assert.equal(saved.messages[0]?.text ?? '', '已保存全局目标。');
-  assert.equal(codexGoalManager.state.goal, '持续把 CodexBridge 的微信体验打磨到更稳定');
+  assert.equal(saved.messages[0]?.text ?? '', '已为当前线程设置目标。');
+  assert.equal(
+    openai.threadGoals.get(session?.codexThreadId ?? '')?.objective,
+    '持续把 CodexBridge 的微信体验打磨到更稳定',
+  );
+  assert.equal(openai.threadGoals.get(session?.codexThreadId ?? '')?.status, 'active');
 
   await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -4850,18 +4871,47 @@ test('/goal stays hidden until goals is enabled and then manages a global persis
     text: '继续处理当前问题',
   });
   const lastTurn = openai.startTurnCalls.at(-1);
-  assert.equal(
-    lastTurn?.event?.metadata?.codexbridge?.goalContext?.goal,
-    '持续把 CodexBridge 的微信体验打磨到更稳定',
-  );
+  assert.equal(lastTurn?.event?.metadata?.codexbridge?.goalContext?.goal ?? null, null);
+
+  const paused = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+    text: '/goal pause',
+  });
+  assert.equal(paused.messages[0]?.text ?? '', '已暂停当前线程目标。');
+  assert.equal(openai.threadGoals.get(session?.codexThreadId ?? '')?.status, 'paused');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+    text: '暂停后继续测试',
+  });
+  const pausedTurn = openai.startTurnCalls.at(-1);
+  assert.equal(pausedTurn?.event?.metadata?.codexbridge?.goalContext?.goal ?? null, null);
+
+  const resumed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+    text: '/goal resume',
+  });
+  assert.equal(resumed.messages[0]?.text ?? '', '已恢复当前线程目标。');
+  assert.equal(openai.threadGoals.get(session?.codexThreadId ?? '')?.status, 'active');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-1',
+    text: '恢复后继续测试',
+  });
+  const resumedTurn = openai.startTurnCalls.at(-1);
+  assert.equal(resumedTurn?.event?.metadata?.codexbridge?.goalContext?.goal ?? null, null);
 
   const cleared = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-goal-1',
     text: '/goal clear',
   });
-  assert.equal(cleared.messages[0]?.text ?? '', '已清除全局目标。');
-  assert.equal(codexGoalManager.state.goal, '');
+  assert.equal(cleared.messages[0]?.text ?? '', '已清除当前线程目标。');
+  assert.equal(openai.threadGoals.has(session?.codexThreadId ?? ''), false);
 });
 
 test('legacy service tier values are normalized to fast/flex in status output', async () => {

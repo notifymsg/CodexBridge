@@ -5,6 +5,7 @@ export interface CodexGoalSnapshot {
   path: string;
   goal: string;
   exists: boolean;
+  paused: boolean;
 }
 
 export class CodexGoalManager {
@@ -21,17 +22,19 @@ export class CodexGoalManager {
   async readGoal(): Promise<CodexGoalSnapshot> {
     try {
       const raw = await fs.promises.readFile(this.filePath, 'utf8');
-      const goal = normalizeGoalText(raw);
+      const parsed = parseGoalFile(raw);
       return {
         path: this.filePath,
-        goal,
-        exists: Boolean(goal),
+        goal: parsed.goal,
+        exists: Boolean(parsed.goal),
+        paused: parsed.paused,
       };
     } catch {
       return {
         path: this.filePath,
         goal: '',
         exists: false,
+        paused: false,
       };
     }
   }
@@ -41,11 +44,49 @@ export class CodexGoalManager {
     if (!normalized) {
       return this.clearGoal();
     }
-    await writeTextAtomic(this.filePath, `${normalized}\n`);
+    await writeTextAtomic(this.filePath, JSON.stringify({
+      goal: normalized,
+      paused: false,
+    }, null, 2));
     return {
       path: this.filePath,
       goal: normalized,
       exists: true,
+      paused: false,
+    };
+  }
+
+  async pauseGoal(): Promise<CodexGoalSnapshot> {
+    const current = await this.readGoal();
+    if (!current.exists || !current.goal) {
+      return current;
+    }
+    await writeTextAtomic(this.filePath, JSON.stringify({
+      goal: current.goal,
+      paused: true,
+    }, null, 2));
+    return {
+      path: this.filePath,
+      goal: current.goal,
+      exists: true,
+      paused: true,
+    };
+  }
+
+  async resumeGoal(): Promise<CodexGoalSnapshot> {
+    const current = await this.readGoal();
+    if (!current.exists || !current.goal) {
+      return current;
+    }
+    await writeTextAtomic(this.filePath, JSON.stringify({
+      goal: current.goal,
+      paused: false,
+    }, null, 2));
+    return {
+      path: this.filePath,
+      goal: current.goal,
+      exists: true,
+      paused: false,
     };
   }
 
@@ -57,12 +98,29 @@ export class CodexGoalManager {
       path: this.filePath,
       goal: '',
       exists: false,
+      paused: false,
     };
   }
 }
 
 function normalizeGoalText(value: unknown): string {
   return String(value ?? '').trim();
+}
+
+function parseGoalFile(raw: string): { goal: string; paused: boolean } {
+  const text = String(raw ?? '');
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return {
+      goal: normalizeGoalText(parsed.goal),
+      paused: parsed.paused === true,
+    };
+  } catch {
+    return {
+      goal: normalizeGoalText(text),
+      paused: false,
+    };
+  }
 }
 
 async function writeTextAtomic(filePath: string, text: string): Promise<void> {

@@ -887,6 +887,8 @@ interface CodexExperimentalFeaturesManagerLike {
 interface CodexGoalManagerLike {
   readGoal(): Promise<CodexGoalSnapshot>;
   writeGoal(goal: string): Promise<CodexGoalSnapshot>;
+  pauseGoal(): Promise<CodexGoalSnapshot>;
+  resumeGoal(): Promise<CodexGoalSnapshot>;
   clearGoal(): Promise<CodexGoalSnapshot>;
 }
 
@@ -4600,31 +4602,46 @@ export class BridgeCoordinator {
       return this.renderGoalStatus(event);
     }
     const action = normalizedArgs[0]?.toLowerCase() ?? '';
+    if (action === 'pause') {
+      return this.pauseThreadGoal(event);
+    }
+    if (action === 'resume') {
+      return this.resumeThreadGoal(event);
+    }
     if (action === 'clear' || action === 'reset' || action === 'off') {
-      return this.clearGlobalGoal(event);
+      return this.clearThreadGoal(event);
     }
     if (action === 'show' || action === 'status') {
       return this.renderGoalStatus(event);
     }
-    if (action === 'set') {
-      const nextGoal = normalizedArgs.slice(1).join(' ').trim();
-      if (!nextGoal) {
-        return this.handleHelpsCommand(event, ['goal']);
-      }
-      return this.saveGlobalGoal(event, nextGoal);
-    }
-    return this.saveGlobalGoal(event, normalizedArgs.join(' '));
+    return this.setThreadGoal(event, normalizedArgs.join(' '));
   }
 
   async renderGoalStatus(event) {
-    const snapshot = await this.codexGoalManager.readGoal();
+    const resolved = await this.resolveNativeGoalCommandContext(event);
+    if ('response' in resolved) {
+      return resolved.response;
+    }
+    let goal = null;
+    try {
+      goal = await resolved.providerPlugin.getThreadGoal({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+      });
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.goal.failed', { error: formatUserError(error) }),
+      ], buildSessionMeta(resolved.session));
+    }
     const lines = [
       this.t('coordinator.goal.title'),
       this.t('coordinator.goal.scope'),
+      this.t('coordinator.goal.threadBound', { value: resolved.session.codexThreadId }),
     ];
-    if (snapshot.exists && snapshot.goal) {
+    if (goal?.objective) {
       lines.push(this.t('coordinator.goal.currentLabel'));
-      lines.push(snapshot.goal);
+      lines.push(goal.objective);
+      lines.push(this.formatNativeGoalStatus(goal.status));
     } else {
       lines.push(this.t('coordinator.goal.currentNone'));
     }
@@ -4632,25 +4649,158 @@ export class BridgeCoordinator {
       this.t('coordinator.goal.usage'),
       this.t('coordinator.goal.help'),
     );
-    return messageResponse(lines, this.buildScopedSessionMeta(event));
+    return messageResponse(lines, buildSessionMeta(resolved.session));
   }
 
-  async saveGlobalGoal(event, goalText: string) {
-    const snapshot = await this.codexGoalManager.writeGoal(goalText);
-    return messageResponse([
-      this.t('coordinator.goal.saved'),
-      this.t('coordinator.goal.currentLabel'),
-      snapshot.goal,
-      this.t('coordinator.goal.applyNextTurn'),
-    ], this.buildScopedSessionMeta(event));
+  async setThreadGoal(event, goalText: string) {
+    const resolved = await this.resolveNativeGoalCommandContext(event);
+    if ('response' in resolved) {
+      return resolved.response;
+    }
+    try {
+      const goal = await resolved.providerPlugin.setThreadGoal({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+        objective: goalText,
+        suppressAutoTurn: true,
+      });
+      return messageResponse([
+        this.t('coordinator.goal.saved'),
+        this.t('coordinator.goal.currentLabel'),
+        goal?.objective ?? goalText,
+        this.formatNativeGoalStatus(goal?.status ?? 'active'),
+        this.t('coordinator.goal.nativeUpdated'),
+      ], buildSessionMeta(resolved.session));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.goal.failed', { error: formatUserError(error) }),
+      ], buildSessionMeta(resolved.session));
+    }
   }
 
-  async clearGlobalGoal(event) {
-    await this.codexGoalManager.clearGoal();
-    return messageResponse([
-      this.t('coordinator.goal.cleared'),
-      this.t('coordinator.goal.applyNextTurn'),
-    ], this.buildScopedSessionMeta(event));
+  async pauseThreadGoal(event) {
+    return this.updateThreadGoalStatus(event, 'paused', 'coordinator.goal.paused');
+  }
+
+  async resumeThreadGoal(event) {
+    return this.updateThreadGoalStatus(event, 'active', 'coordinator.goal.resumed');
+  }
+
+  async clearThreadGoal(event) {
+    const resolved = await this.resolveNativeGoalCommandContext(event);
+    if ('response' in resolved) {
+      return resolved.response;
+    }
+    try {
+      const currentGoal = await resolved.providerPlugin.getThreadGoal({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+      });
+      if (!currentGoal?.objective) {
+        return this.renderGoalStatus(event);
+      }
+      await resolved.providerPlugin.clearThreadGoal({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+      });
+      return messageResponse([
+        this.t('coordinator.goal.cleared'),
+        this.t('coordinator.goal.nativeUpdated'),
+      ], buildSessionMeta(resolved.session));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.goal.failed', { error: formatUserError(error) }),
+      ], buildSessionMeta(resolved.session));
+    }
+  }
+
+  async updateThreadGoalStatus(event, status, successKey) {
+    const resolved = await this.resolveNativeGoalCommandContext(event);
+    if ('response' in resolved) {
+      return resolved.response;
+    }
+    try {
+      const currentGoal = await resolved.providerPlugin.getThreadGoal({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+      });
+      if (!currentGoal?.objective) {
+        return this.renderGoalStatus(event);
+      }
+      const nextGoal = await resolved.providerPlugin.setThreadGoal({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+        status,
+        suppressAutoTurn: status === 'active',
+      });
+      return messageResponse([
+        this.t(successKey),
+        this.t('coordinator.goal.currentLabel'),
+        nextGoal?.objective ?? currentGoal.objective,
+        this.formatNativeGoalStatus(nextGoal?.status ?? status),
+        this.t('coordinator.goal.nativeUpdated'),
+      ], buildSessionMeta(resolved.session));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.goal.failed', { error: formatUserError(error) }),
+      ], buildSessionMeta(resolved.session));
+    }
+  }
+
+  async resolveNativeGoalCommandContext(event) {
+    const scopeRef = toScopeRef(event);
+    const session = this.resolveSessionForEvent(scopeRef, event);
+    if (!session) {
+      return {
+        response: messageResponse([
+          this.t('coordinator.goal.noThread'),
+          this.t('coordinator.goal.setupHint'),
+        ], this.buildScopedSessionMeta(event)),
+      };
+    }
+    const providerProfile = this.requireProviderProfile(session.providerProfileId);
+    if (!CODEX_EXPERIMENTAL_PROVIDER_KIND_SET.has(String(providerProfile?.providerKind ?? ''))) {
+      return {
+        response: messageResponse([
+          this.t('coordinator.goal.providerUnsupported'),
+        ], buildSessionMeta(session)),
+      };
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (
+      typeof providerPlugin?.getThreadGoal !== 'function'
+      || typeof providerPlugin?.setThreadGoal !== 'function'
+      || typeof providerPlugin?.clearThreadGoal !== 'function'
+    ) {
+      return {
+        response: messageResponse([
+          this.t('coordinator.goal.providerUnsupported'),
+        ], buildSessionMeta(session)),
+      };
+    }
+    return {
+      scopeRef,
+      session,
+      providerProfile,
+      providerPlugin,
+    };
+  }
+
+  formatNativeGoalStatus(status) {
+    switch (String(status ?? '').trim().toLowerCase()) {
+      case 'paused':
+        return this.t('coordinator.goal.statePaused');
+      case 'budgetlimited':
+      case 'budget_limited':
+      case 'budget-limited':
+        return this.t('coordinator.goal.stateBudgetLimited');
+      case 'complete':
+      case 'completed':
+        return this.t('coordinator.goal.stateComplete');
+      case 'active':
+      default:
+        return this.t('coordinator.goal.stateActive');
+    }
   }
 
   async handlePersonalityCommand(event, args) {
@@ -8765,25 +8915,6 @@ export class BridgeCoordinator {
     return this.isCodexExperimentalFeatureEnabled('goals');
   }
 
-  async withGlobalGoalContext(event, providerProfile) {
-    if (!CODEX_EXPERIMENTAL_PROVIDER_KIND_SET.has(String(providerProfile?.providerKind ?? ''))) {
-      return event;
-    }
-    const snapshot = await this.codexGoalManager.readGoal();
-    if (!snapshot.exists || !snapshot.goal) {
-      return event;
-    }
-    if (!(await this.isCodexGoalCommandAvailable())) {
-      return event;
-    }
-    return withCodexbridgeMetadata(event, {
-      goalContext: {
-        scope: 'global',
-        goal: snapshot.goal,
-      },
-    });
-  }
-
   resolveCodexExperimentalCliBin(): string {
     const profiles = typeof this.providerProfiles?.list === 'function'
       ? this.providerProfiles.list()
@@ -10969,8 +11100,7 @@ export class BridgeCoordinator {
     });
     const pendingArtifactDelivery = createPendingTurnArtifactDeliveryState(turnArtifactContext);
     ensureTurnArtifactDirectories(turnArtifactContext);
-    const goalAwareEvent = await this.withGlobalGoalContext(event, providerProfile);
-    const turnEvent = withTurnArtifactContext(goalAwareEvent, turnArtifactContext);
+    const turnEvent = withTurnArtifactContext(event, turnArtifactContext);
     this.activeTurns?.updateScopeTurn(scopeRef, {
       bridgeSessionId: session.id,
       providerProfileId: session.providerProfileId,
@@ -18226,14 +18356,16 @@ function getCommandHelpSpecs(i18n: Translator) {
     usage: [
       '/goal',
       '/goal <text>',
-      '/goal set <text>',
+      '/goal pause',
+      '/goal resume',
       '/goal clear',
       '/goal -h',
     ],
     examples: [
       '/goal',
       '/goal 持续把 CodexBridge 的微信体验打磨到更稳定',
-      '/goal set Keep CodexBridge focused on reliable WeChat delivery.',
+      '/goal pause',
+      '/goal resume',
       '/goal clear',
     ],
     notes: [

@@ -382,25 +382,27 @@ Notes:
 
 Only available when `/experimental on goals` has been enabled.
 
-- `/goal` shows the current global goal
-- `/goal <text>` sets the global goal directly
-- `/goal set <text>` sets the global goal explicitly
-- `/goal clear` removes the global goal
+- `/goal` shows the native goal on the current bound Codex thread
+- `/goal <text>` sets the native thread goal directly
+- `/goal pause` pauses the thread goal without clearing it
+- `/goal resume` resumes a paused thread goal
+- `/goal clear` removes the thread goal
 
 Examples:
 
 ```text
 /goal
 /goal 持续把 CodexBridge 的微信体验打磨到更稳定
-/goal set Keep CodexBridge focused on reliable WeChat delivery.
+/goal pause
+/goal resume
 /goal clear
 ```
 
 Notes:
 
-- this is a global Codex goal, not a session-only hint
-- standard user-facing turns automatically inherit the goal context
-- internal parsing, review localization, and similar hidden bridge turns do not inherit it
+- `/goal` now talks to the native Codex thread goal RPC instead of injecting bridge-only goal text
+- it operates on the current bound persistent Codex thread, so run `/new` or send a normal message first if no thread is bound yet
+- updating the goal state is immediate, but a turn that is already running may still finish its current tail work
 
 ### `/skills` and `/sk`
 

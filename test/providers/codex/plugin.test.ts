@@ -169,53 +169,61 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.match(String(seenDeveloperInstructions ?? ''), /thread\/session lifecycle, slash-command state transitions, and final platform delivery/i);
 });
 
-test('CodexProviderPlugin injects the global goal context into standard user-facing turns', async () => {
-  let seenDeveloperInstructions = null;
+test('CodexProviderPlugin forwards native thread goal operations to the app client', async () => {
+  const calls: any[] = [];
   const plugin = makePlugin(() => ({
     async start() {},
-    async startTurn(params: any) {
-      seenDeveloperInstructions = params.developerInstructions;
+    async getThreadGoal(threadId: string) {
+      calls.push(['getThreadGoal', threadId]);
       return {
-        outputText: 'done',
-        threadId: params.threadId,
-        title: null,
+        threadId,
+        objective: 'Keep replies concise.',
+        status: 'active',
       };
     },
-    async listModels() {
-      return [{
-        id: 'gpt-5.4',
-        model: 'gpt-5.4',
-        displayName: 'GPT-5.4',
-        description: '',
-        isDefault: true,
-        supportedReasoningEfforts: ['low', 'medium', 'high'],
-        defaultReasoningEffort: 'medium',
-      }];
+    async setThreadGoal(params: any) {
+      calls.push(['setThreadGoal', params]);
+      return {
+        threadId: params.threadId,
+        objective: params.objective ?? 'Keep replies concise.',
+        status: params.status ?? 'active',
+      };
+    },
+    async clearThreadGoal(threadId: string) {
+      calls.push(['clearThreadGoal', threadId]);
+      return true;
     },
   }));
 
-  await plugin.startTurn({
-    providerProfile: makeProfile({ defaultModel: 'gpt-5.4' }),
-    bridgeSession: makeBridgeSession({ codexThreadId: 'thread-1' }),
-    sessionSettings: makeSessionSettings(),
-    event: {
-      platform: 'weixin',
-      externalScopeId: 'wxid_goal',
-      text: 'hello',
-      metadata: {
-        codexbridge: {
-          goalContext: {
-            scope: 'global',
-            goal: 'Keep CodexBridge focused on reliable WeChat delivery.',
-          },
-        },
-      },
-    },
-    inputText: 'hello',
+  const profile = makeProfile({ defaultModel: 'gpt-5.4' });
+  const current = await plugin.getThreadGoal({
+    providerProfile: profile,
+    threadId: 'thread-1',
+  });
+  const updated = await plugin.setThreadGoal({
+    providerProfile: profile,
+    threadId: 'thread-1',
+    objective: 'Keep CodexBridge focused on reliable WeChat delivery.',
+    suppressAutoTurn: true,
+  });
+  const cleared = await plugin.clearThreadGoal({
+    providerProfile: profile,
+    threadId: 'thread-1',
   });
 
-  assert.match(String(seenDeveloperInstructions ?? ''), /CodexBridge global goal:/);
-  assert.match(String(seenDeveloperInstructions ?? ''), /Keep CodexBridge focused on reliable WeChat delivery\./);
+  assert.equal(current?.objective, 'Keep replies concise.');
+  assert.equal(updated?.objective, 'Keep CodexBridge focused on reliable WeChat delivery.');
+  assert.equal(cleared, true);
+  assert.deepEqual(calls, [
+    ['getThreadGoal', 'thread-1'],
+    ['setThreadGoal', {
+      threadId: 'thread-1',
+      objective: 'Keep CodexBridge focused on reliable WeChat delivery.',
+      status: null,
+      suppressAutoTurn: true,
+    }],
+    ['clearThreadGoal', 'thread-1'],
+  ]);
 });
 
 test('CodexProviderPlugin clamps unsupported reasoning efforts to the model fallback', async () => {

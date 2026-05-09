@@ -21,6 +21,7 @@ import type {
   ProviderPluginInstallResult,
   ProviderPluginsListResult,
   ProviderSkillsListResult,
+  ProviderThreadGoal,
   ProviderThreadListResult,
   ProviderThreadStartResult,
   ProviderThreadSummary,
@@ -118,6 +119,50 @@ export class CodexProviderPlugin {
     }
     const client = await this.ensureClient(providerProfile);
     return client.readThread(threadId, includeTurns);
+  }
+
+  async getThreadGoal({
+    providerProfile,
+    threadId,
+  }: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+  }): Promise<ProviderThreadGoal | null> {
+    const client = await this.ensureClient(providerProfile);
+    return client.getThreadGoal(threadId);
+  }
+
+  async setThreadGoal({
+    providerProfile,
+    threadId,
+    objective = null,
+    status = null,
+    suppressAutoTurn = false,
+  }: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    objective?: string | null;
+    status?: string | null;
+    suppressAutoTurn?: boolean;
+  }): Promise<ProviderThreadGoal | null> {
+    const client = await this.ensureClient(providerProfile);
+    return client.setThreadGoal({
+      threadId,
+      objective,
+      status,
+      suppressAutoTurn,
+    });
+  }
+
+  async clearThreadGoal({
+    providerProfile,
+    threadId,
+  }: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+  }): Promise<boolean> {
+    const client = await this.ensureClient(providerProfile);
+    return client.clearThreadGoal(threadId);
   }
 
   async listThreads({
@@ -709,14 +754,6 @@ function buildDeveloperInstructions(event: InboundTextEvent): string {
   if (explicitPluginInstructions) {
     parts.push(explicitPluginInstructions);
   }
-  const goalInstructions = buildGoalDeveloperInstructions(
-    resolveGoalContext(event),
-    developerPromptContext,
-    retryContext,
-  );
-  if (goalInstructions) {
-    parts.push(goalInstructions);
-  }
   return parts.filter(Boolean).join('\n\n');
 }
 
@@ -778,53 +815,6 @@ function resolveDeveloperPromptContext(event: InboundTextEvent): DeveloperPrompt
     subcommand: normalizeDeveloperPromptContextValue(raw.subcommand),
     operation: normalizeDeveloperPromptContextValue(raw.operation),
   };
-}
-
-function resolveGoalContext(event: InboundTextEvent): { scope: string; goal: string } | null {
-  const metadata = event?.metadata;
-  if (!metadata || typeof metadata !== 'object') {
-    return null;
-  }
-  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
-  if (!codexbridge || typeof codexbridge !== 'object') {
-    return null;
-  }
-  const context = (codexbridge as Record<string, unknown>).goalContext;
-  if (!context || typeof context !== 'object') {
-    return null;
-  }
-  const raw = context as Record<string, unknown>;
-  const goal = normalizeDeveloperPromptContextValue(raw.goal);
-  if (!goal) {
-    return null;
-  }
-  const scope = normalizeDeveloperPromptContextValue(raw.scope) ?? 'global';
-  return { scope, goal };
-}
-
-function buildGoalDeveloperInstructions(
-  goalContext: { scope: string; goal: string } | null,
-  context: DeveloperPromptContext | null,
-  retryContext: Record<string, unknown> | null,
-): string {
-  if (!goalContext?.goal) {
-    return '';
-  }
-  const effectiveMode = context?.mode ?? (retryContext ? 'retry-recovery' : 'standard');
-  if (
-    effectiveMode === 'command-skill-parser'
-    || effectiveMode === 'review-result-localizer'
-    || effectiveMode === 'agent-result-verifier'
-  ) {
-    return '';
-  }
-  return [
-    'CodexBridge global goal:',
-    '- A persistent global goal is currently active for standard user-facing turns.',
-    '- Treat it as long-lived background intent, but always obey the user\'s direct request when there is any conflict.',
-    `- Scope: ${goalContext.scope}`,
-    `- Goal: ${goalContext.goal}`,
-  ].join('\n');
 }
 
 function resolveRetryContext(event: InboundTextEvent): Record<string, unknown> | null {

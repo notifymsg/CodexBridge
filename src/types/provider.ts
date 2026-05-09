@@ -37,6 +37,17 @@ export interface ProviderThreadSummary {
   path?: string | null;
 }
 
+export interface ProviderThreadGoal {
+  threadId: string;
+  objective: string;
+  status: string;
+  tokenBudget?: number | null;
+  tokensUsed?: number | null;
+  timeUsedSeconds?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface ProviderThreadStartResult {
   threadId: string;
   cwd: string | null;
@@ -313,6 +324,21 @@ export interface ProviderPluginContract {
     threadId: string;
     includeTurns?: boolean;
   }): Promise<ProviderThreadSummary | null>;
+  getThreadGoal?(params: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+  }): Promise<ProviderThreadGoal | null>;
+  setThreadGoal?(params: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    objective?: string | null;
+    status?: string | null;
+    suppressAutoTurn?: boolean;
+  }): Promise<ProviderThreadGoal | null>;
+  clearThreadGoal?(params: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+  }): Promise<boolean>;
   listThreads(params: {
     providerProfile: ProviderProfile;
     limit?: number;
