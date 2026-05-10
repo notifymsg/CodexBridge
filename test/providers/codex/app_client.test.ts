@@ -1553,6 +1553,94 @@ test('CodexAppClient retries thread reads that time out while waiting for turn c
   assert.equal(readCount, 2);
 });
 
+test('CodexAppClient falls back to progress text when ephemeral threads reject includeTurns', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const progress = [];
+  let readCount = 0;
+  client.request = async (method, params) => {
+    if (method === 'turn/start') {
+      setTimeout(() => {
+        client.emit('notification', {
+          method: 'item/started',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            item: {
+              id: 'item-1',
+              type: 'agentMessage',
+              phase: 'final_answer',
+            },
+          },
+        });
+        client.emit('notification', {
+          method: 'item/agentMessage/delta',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'item-1',
+            delta: '{"title":"测试"}',
+          },
+        });
+        client.emit('notification', {
+          method: 'item/completed',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            item: { id: 'item-1' },
+          },
+        });
+        client.emit('notification', {
+          method: 'turn/completed',
+          params: {
+            threadId: 'thread-1',
+          },
+        });
+      }, 10);
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      if (params?.includeTurns) {
+        throw new Error('ephemeral threads do not support includeTurns');
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Ephemeral Planner',
+          path: '/tmp/ephemeral-thread',
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'qwen-plus',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+    onProgress(update) {
+      progress.push(update);
+    },
+  });
+
+  assert.equal(result.outputText, '{"title":"测试"}');
+  assert.equal(result.outputState, 'complete');
+  assert.equal(result.finalSource, 'progress_only');
+  assert.equal(result.title, 'Ephemeral Planner');
+  assert.equal(readCount >= 2, true);
+  assert.deepEqual(progress, [{
+    text: '{"title":"测试"}',
+    delta: '{"title":"测试"}',
+    outputKind: 'final_answer',
+  }]);
+});
+
 test('CodexAppClient waits for assistant output after a terminal turn initially contains no visible items', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

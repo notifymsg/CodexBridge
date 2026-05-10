@@ -17,6 +17,7 @@ import {
   parseWeixinLoginArgs,
   parseWeixinServeArgs,
   readPendingRestartNotifications,
+  resolveEmbeddedCodexNativeApiOptions,
   resolveClearContextAccountId,
 } from '../../../src/cli.js';
 
@@ -137,6 +138,50 @@ test('parseCodexNativeApiServeArgs reads standalone native-api flags', () => {
     host: '127.0.0.1',
     port: 43182,
     providerProfileId: 'openai-default',
+  });
+});
+
+test('resolveEmbeddedCodexNativeApiOptions defaults native-api startup to the Codex path when enabled', () => {
+  const options = resolveEmbeddedCodexNativeApiOptions({
+    env: {
+      CODEX_NATIVE_API_ENABLE: '1',
+      CODEX_NATIVE_API_AUTH_TOKEN: 'native-secret',
+    } as NodeJS.ProcessEnv,
+    defaultProviderProfileId: 'qwen',
+  });
+
+  assert.deepEqual(options, {
+    enabled: true,
+    host: '127.0.0.1',
+    port: 43182,
+    providerProfileId: 'openai-default',
+    authToken: 'native-secret',
+    defaultModel: null,
+    requestTitlePrefix: null,
+  });
+});
+
+test('resolveEmbeddedCodexNativeApiOptions keeps embedded native-api on the Codex path while honoring host/port/model overrides', () => {
+  const options = resolveEmbeddedCodexNativeApiOptions({
+    env: {
+      CODEX_NATIVE_API_ENABLE: 'true',
+      CODEX_NATIVE_API_HOST: '127.0.0.2',
+      CODEX_NATIVE_API_PORT: '53182',
+      CODEX_NATIVE_API_PROVIDER_PROFILE_ID: 'qwen',
+      CODEX_NATIVE_API_DEFAULT_MODEL: 'gpt-5.4',
+      CODEX_NATIVE_API_TITLE_PREFIX: 'Bridge Native API',
+    } as NodeJS.ProcessEnv,
+    defaultProviderProfileId: 'openai-default',
+  });
+
+  assert.deepEqual(options, {
+    enabled: true,
+    host: '127.0.0.2',
+    port: 53182,
+    providerProfileId: 'openai-default',
+    authToken: null,
+    defaultModel: 'gpt-5.4',
+    requestTitlePrefix: 'Bridge Native API',
   });
 });
 

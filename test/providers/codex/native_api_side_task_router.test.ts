@@ -7,7 +7,7 @@ import { CodexNativeRuntime } from '../../../src/providers/codex/native_runtime.
 function makeProfile(overrides = {}) {
   return {
     id: 'openai-default',
-    providerKind: 'codex',
+    providerKind: 'openai-native',
     displayName: 'Codex OpenAI',
     config: {},
     createdAt: Date.now(),
@@ -255,6 +255,56 @@ test('CodexNativeApiSideTaskRouter only routes explicitly enabled task classes t
   const execution = await router.execute({
     taskClass: 'normalization',
     providerProfile: makeProfile(),
+    providerPlugin,
+    cwd: '/repo',
+    title: 'Thread Command Skill',
+    inputText: 'Normalize this request.',
+    event: makeEvent(),
+  });
+
+  assert.equal(execution.route, 'direct_native');
+  assert.equal(fetchCalls, 0);
+});
+
+test('CodexNativeApiSideTaskRouter keeps non-native provider profiles on direct execution even when localhost native API is enabled', async () => {
+  const runtime = new CodexNativeRuntime({
+    now: () => 444,
+    createSessionId: () => 'session-direct-native-3',
+  });
+  let fetchCalls = 0;
+  const providerPlugin = {
+    async startThread(params: any) {
+      return {
+        threadId: 'thread-direct-native-3',
+        cwd: params.cwd,
+        title: params.title,
+      };
+    },
+    async startTurn(params: any) {
+      return {
+        outputText: 'direct native qwen reply',
+        previewText: '',
+        threadId: params.bridgeSession.codexThreadId,
+        turnId: 'turn-direct-native-3',
+      };
+    },
+  } as any;
+  const router = new CodexNativeApiSideTaskRouter({
+    runtime,
+    baseUrl: 'http://127.0.0.1:43182',
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new TypeError('fetch should not be called for non-native provider profiles');
+    },
+  });
+
+  const execution = await router.execute({
+    taskClass: 'normalization',
+    providerProfile: makeProfile({
+      id: 'qwen',
+      providerKind: 'openai-compatible',
+      displayName: 'Qwen',
+    }),
     providerPlugin,
     cwd: '/repo',
     title: 'Thread Command Skill',

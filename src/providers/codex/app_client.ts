@@ -1470,6 +1470,8 @@ export class CodexAppClient extends EventEmitter {
     let lastTurnSnapshotKey = null;
     let stableTerminalReadCount = 0;
     let pollCount = 0;
+    let includeTurnsUnsupported = false;
+    let includeTurnsUnsupportedAt = 0;
     let pendingApprovalWaitLogged = false;
     let lastPendingApprovalCount = 0;
     const terminalSettleMs = computeTerminalSettleMs(timeoutMs);
@@ -1480,7 +1482,11 @@ export class CodexAppClient extends EventEmitter {
       lastAssistantActivityAt: 0,
     };
     const itemOutputKinds = new Map();
+    let sawTerminalNotification = false;
     const onNotification = (notification) => {
+      if (isTerminalNotificationForThread(notification, threadId, turnId)) {
+        sawTerminalNotification = true;
+      }
       const progress = extractProgressUpdate(notification, turnId, itemOutputKinds, progressState);
       if (!progress) {
         return;
@@ -1548,7 +1554,7 @@ export class CodexAppClient extends EventEmitter {
         pollCount += 1;
         let thread = null;
         try {
-          thread = await this.readThread(threadId, true);
+          thread = await this.readThread(threadId, !includeTurnsUnsupported);
         } catch (error) {
           if (isThreadMaterializationPendingError(error)) {
             this.logDebug('turn_poll_retry', {
@@ -1570,9 +1576,31 @@ export class CodexAppClient extends EventEmitter {
             await this.turnPollSleep(1000);
             continue;
           }
-          throw error;
+          if (isIncludeTurnsUnsupportedError(error)) {
+            includeTurnsUnsupported = true;
+            includeTurnsUnsupportedAt ||= this.turnPollNow();
+            this.logDebug('turn_poll_retry', {
+              threadId,
+              turnId,
+              pollCount,
+              reason: 'thread_read_include_turns_unsupported',
+            });
+            try {
+              thread = await this.readThread(threadId, false);
+            } catch (fallbackError) {
+              if (isThreadMaterializationPendingError(fallbackError) || isRequestTimeoutError(fallbackError)) {
+                await this.turnPollSleep(250);
+                continue;
+              }
+              throw fallbackError;
+            }
+          } else {
+            throw error;
+          }
         }
-        const turn = thread?.turns?.find((entry) => entry.id === turnId) ?? null;
+        const turn = includeTurnsUnsupported
+          ? null
+          : thread?.turns?.find((entry) => entry.id === turnId) ?? null;
         this.logDebug('turn_poll_snapshot', {
           threadId,
           turnId,
@@ -1583,6 +1611,59 @@ export class CodexAppClient extends EventEmitter {
           turn: summarizeTurnSnapshot(turn),
           progress: summarizeProgressState(progressState),
         });
+        if (includeTurnsUnsupported) {
+          const previewText = progressState.finalAnswerText || progressState.commentaryText;
+          const settleAnchor = Math.max(
+            includeTurnsUnsupportedAt,
+            progressState.lastAssistantActivityAt || 0,
+          );
+          const settleElapsedMs = settleAnchor ? this.turnPollNow() - settleAnchor : 0;
+          if (
+            (
+              !sawTerminalNotification
+              || !previewText
+              || settleElapsedMs < 500
+            )
+            && this.turnPollNow() + 250 < deadline
+          ) {
+            await this.turnPollSleep(250);
+            continue;
+          }
+          if (previewText) {
+            const result = {
+              turnId,
+              threadId,
+              title: thread?.title ?? null,
+              outputText: previewText,
+              outputArtifacts: [],
+              outputMedia: [],
+              outputState: sawTerminalNotification ? 'complete' : 'partial',
+              previewText: progressState.finalAnswerText,
+              finalSource: progressState.finalAnswerText ? 'progress_only' : 'commentary_only',
+              status: sawTerminalNotification ? 'completed' : null,
+            };
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
+          }
+          if (sawTerminalNotification) {
+            const result = {
+              turnId,
+              threadId,
+              title: thread?.title ?? null,
+              outputText: '',
+              outputArtifacts: [],
+              outputMedia: [],
+              outputState: 'missing',
+              previewText: '',
+              finalSource: 'none',
+              status: 'completed',
+            };
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
+          }
+          await this.turnPollSleep(250);
+          continue;
+        }
         if (turn) {
           this.observeApprovedExecutionTurnSnapshot({
             threadId,
@@ -3078,9 +3159,33 @@ function isThreadMaterializationPendingError(error) {
     || /empty session file/i.test(message);
 }
 
+function isIncludeTurnsUnsupportedError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ephemeral threads do not support includeTurns/i.test(message);
+}
+
 function isRequestTimeoutError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /Timed out waiting for Codex JSON-RPC response to /i.test(message);
+}
+
+function isTerminalNotificationForThread(
+  notification: any,
+  threadId: string,
+  turnId: string,
+): boolean {
+  if (extractThreadIdFromNotification(notification) !== threadId) {
+    return false;
+  }
+  const method = String(notification?.method ?? '').replace(/[^a-z]/gi, '').toLowerCase();
+  if (method === 'turncompleted') {
+    return true;
+  }
+  if (method === 'itemcompleted') {
+    const notificationTurnId = extractNotificationTurnId(notification?.params ?? null);
+    return !notificationTurnId || notificationTurnId === turnId;
+  }
+  return false;
 }
 
 function computeTerminalSettleMs(timeoutMs) {

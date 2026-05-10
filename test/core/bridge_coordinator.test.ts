@@ -7886,6 +7886,67 @@ test('/agent natural language falls back to the bound provider planner after one
   }
 });
 
+test('/agent natural language accepts loose JSON from the bound provider planner', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    let providerPlannerTurns = 0;
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = normalizeCommandSkillInput(params?.inputText);
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        return {
+          outputText: 'not json',
+        };
+      }
+      if (parserInput.includes('请把下面的微信 /agent 请求整理成严格 JSON')) {
+        providerPlannerTurns += 1;
+        return {
+          outputText: `下面是整理后的草案：
+{
+  "title": "推进 codex-native-api",
+  "goal": "严格按 TODO 中最早未完成项逐项推进 codex-native-api，每完成一个最小完整阶段即同步更新文档、验证并提交推送",
+  "expectedOutput": "docs/todo/codex-native-api.md 更新并完成当前最早未完成项",
+  "acceptanceCriteria": [
+    "更新 docs/todo/codex-native-api.md",
+    "运行相关验证",
+  ],
+  "plan": [
+    "完成当前最早未完成项",
+    "更新文档与验证结果",
+    "提交并推送当前分支",
+  ],
+  "category": "code",
+  "riskLevel": "medium",
+  "mode": "codex",
+}
+请直接使用这个草案。`,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-provider-loose-json-1',
+      text: '/agent 继续推进 codex-native-api，并完成当前最早未完成项',
+    });
+
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.equal(providerPlannerTurns, 1);
+    assert.match(responseText, /草案来源：当前 Provider/);
+    assert.match(responseText, /推进 codex-native-api/);
+    assert.match(responseText, /docs\/todo\/codex-native-api\.md 更新并完成当前最早未完成项/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
 test('/agent natural language falls back to local rules even when OPENAI_API_KEY is present once provider planning is unavailable', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'openai-test-key';

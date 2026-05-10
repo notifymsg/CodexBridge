@@ -88,6 +88,24 @@ Evolution direction:
 - later if justified: standalone npm package that others can install without
   depending on full CodexBridge bridge UX
 
+## Current Closure Policy
+
+The current implementation already contains some provider-selectable localhost
+API seams because it reused the existing CodexBridge provider-profile and
+provider-plugin infrastructure.
+
+For the current closure phase:
+
+- do not delete those generalized seams yet
+- do not keep expanding them either
+- prioritize the `openai-default` / logged-in Codex path until the Codex
+  subscription-to-API shape is fully closed
+- treat any existing Qwen / MiniMax / DeepSeek localhost-native hooks as frozen
+  implementation seams, not as the active workstream target
+
+If provider-selectable localhost routing still matters later, it should return
+as an explicit follow-up expansion step after Codex-only closure is done.
+
 ## Current Active Focus
 
 - [x] Lock the routing model:
@@ -119,6 +137,86 @@ Evolution direction:
     native runtime substrate
   - routed current isolated command-skill/helper turns through that substrate
     instead of duplicating ephemeral-thread bootstrap logic in-place
+- [x] Freeze the current provider-selectable localhost API seams in place
+  without deleting them, and stop expanding them until the Codex-only native
+  subscription path is fully closed
+- [x] Re-scope the remaining closure work around the `openai-default` /
+  logged-in Codex path first, while keeping the main WeChat chat flow
+  unchanged
+
+## Current Closure Priorities
+
+The current closure effort should not continue broad provider-localhost
+generalization work.
+
+It should focus on finishing the Codex subscription-to-API product shape first,
+while leaving the existing generalized seams frozen in place.
+
+### P1: Required before calling this workstream "closed enough"
+
+1. Runtime shape and startup closure
+   - [x] keep standalone startup via `codex native-api-serve`
+   - [x] add the bridge-integrated startup path so `weixin serve` can
+     optionally start the localhost native API service in the same process
+     lifecycle
+     - landed via `CODEX_NATIVE_API_ENABLE=1` plus embedded
+       `CodexNativeApiService` startup inside `src/cli.ts runWeixinServe()`
+   - [x] keep stop/restart behavior symmetrical so the bridge and native-api
+     service can shut down together cleanly
+
+2. Local service configuration closure
+   - [x] standardize the minimum runtime config for the Codex-only path:
+     - `CODEX_NATIVE_API_HOST`
+     - `CODEX_NATIVE_API_PORT`
+     - `CODEX_NATIVE_API_AUTH_TOKEN`
+     - `CODEX_NATIVE_API_DEFAULT_MODEL`
+   - [x] add example configuration for the native-api service
+     - landed in `config/examples/weixin.service.env.example`
+   - [x] document the minimal startup and health-check commands for localhost
+     use
+     - landed in `docs/architecture/codex-native-api.md`
+
+3. Internal consumption closure
+   - [x] keep the current localhost native-api route Codex-only for helper
+     tasks
+     - landed by gating localhost native-api routing to `openai-native`
+       provider requests in `src/providers/codex/native_api_side_task_router.ts`
+   - [x] define which internal CodexBridge side-task lanes should prefer the
+     Codex-only native API path
+     - command-skill parsing
+     - review result localization
+     - agent result verification
+   - [x] define which lanes should remain on direct native execution
+     - when localhost routing is disabled
+     - when localhost native API is unreachable or unhealthy
+     - when the bound provider profile is not `openai-native`
+   - [x] keep the main WeChat chat lane unchanged
+
+### P2: Required to harden the Codex-only path after P1 closes
+
+1. Expand regression coverage for:
+   - continuation mapping
+   - streaming event ordering
+   - local auth / localhost-only assumptions
+   - restart/reconnect behavior when app-server is restarted
+
+2. Add observability for:
+   - request routing target
+   - response mapping
+   - continuation/session linkage
+
+3. Revisit whether persisted continuation recovery is worth the added state
+   surface only after restart semantics, observability, and closure boundaries
+   are otherwise stable
+
+### P3: Do only after the Codex-only path is genuinely stable
+
+1. Confirm that the internal runtime/module boundary no longer depends on
+   bridge-specific UX behavior
+2. Decide whether a single `packages/codex-native-api` package is enough or
+   whether runtime/server should split
+3. Define the minimal public API surface for package consumers
+4. Add package-level tests and exports once extraction begins
 
 ## Reference Projects
 
@@ -219,6 +317,12 @@ Upstream:
     `onTurnStarted` + `onProgress` hooks and emit SSE from that contract,
     instead of polling thread history or inventing a second streaming
     transport beside the logged-in Codex app-server path.
+18. Current closure work must prioritize the `openai-default` / logged-in
+    Codex path even if temporary provider-selectable localhost seams remain in
+    the implementation.
+19. Existing generalized provider-selectable localhost hooks may remain
+    temporarily for future expansion, but they are frozen and should not expand
+    the scope of the current Codex subscription-to-API closure effort.
 
 ## Ordered Executable Sequence
 
@@ -666,31 +770,95 @@ Only after:
   server-facing stream contract for localhost callers
   - landed via native-runtime `onTurnStarted` / `onProgress` forwarding plus
     SSE `stream: true` support in `src/providers/codex/native_api_server.ts`
-- [ ] Keep expanding regression coverage for:
+- [x] Keep expanding regression coverage for:
   - continuation mapping
   - streaming event ordering
   - local auth / localhost-only assumptions
   - restart/reconnect behavior when app-server is restarted
-- [ ] Revisit whether persisted continuation recovery is worth the added state
+  - current focused coverage lives in:
+    - `test/providers/codex/native_api_server.test.ts`
+    - `test/providers/codex/native_api_service.test.ts`
+    - `test/providers/codex/native_api_continuation_registry.test.ts`
+  - the current restart/reconnect slice proves that the same localhost
+    service can move from `native_runtime_unavailable` back to healthy request
+    execution once the underlying Codex runtime becomes reachable again
+- [x] Revisit whether persisted continuation recovery is worth the added state
   surface once restart semantics, observability, and extraction boundaries are
   otherwise stable
-- [ ] Add observability for:
+  - decision: **do not add persisted continuation recovery in the current
+    Codex-only closure**
+  - rationale:
+    - the current product target is a localhost Codex-subscription facade, not
+      a multi-consumer durable orchestration layer
+    - restart semantics are now explicit and tested:
+      service restart drops in-process continuation state and callers receive
+      `continuation_not_found`
+    - observability now exposes enough routing/mapping data to debug broken
+      continuation chains without inventing a second persistence surface
+    - package-extraction boundaries are not stable enough yet to justify
+      durable continuation storage, schema migration, or cross-process replay
+  - reopen only if:
+    - a second real consumer requires restart-stable continuation chains, or
+    - package extraction hardens into a reusable multi-process runtime
+- [x] Add observability for:
   - request routing target
   - response mapping
   - continuation/session linkage
+  - landed via `native_api` metadata returned from `src/providers/codex/native_api_server.ts`
+    across `/v1/health`, `/v1/models`, `/v1/responses`, and `/v1/chat/completions`
+  - current envelope exposes:
+    - `route_path`
+    - `request_target`
+    - `response_mapping`
+    - `continuation`
 
 ### Phase 5: Package extraction readiness
 
-- [ ] Confirm that the internal runtime/module boundary no longer depends on
+- [x] Confirm that the internal runtime/module boundary no longer depends on
   bridge-specific UX behavior
-- [ ] Decide whether a single `packages/codex-native-api` package is enough or
+  - landed by moving the native-api helper sublayer onto provider-local types in:
+    - `src/providers/codex/native_runtime.ts`
+    - `src/providers/codex/native_api_continuation_registry.ts`
+    - `src/providers/codex/native_api_side_task_router.ts`
+  - and by updating `src/types/provider.ts` so `ProviderPluginContract` no
+    longer uses `BridgeSession` / `SessionSettings` / `InboundTextEvent` or
+    bridge-owned artifact-delivery type shapes directly
+  - remaining Phase 5 work is now package topology and public API definition,
+    not bridge-owned type leakage in the native-api sublayer
+- [x] Decide whether a single `packages/codex-native-api` package is enough or
   whether runtime/server should split
-- [ ] Define the minimal public API surface for package consumers
+  - current decision:
+    - start extraction as a single `packages/codex-native-api` package
+    - keep `runtime/server/router/continuation-registry` together during the
+      first extraction because they still share one lifecycle, one auth surface,
+      one localhost contract, and one Codex-only closure target
+    - revisit a runtime/server split only if a later consumer needs the native
+      runtime substrate without the localhost HTTP shell
+- [x] Define the minimal public API surface for package consumers
+  - current first-extraction target surface:
+    - `CodexNativeRuntime`
+    - `CodexNativeApiServer`
+    - `CodexNativeApiService`
+    - `InMemoryCodexNativeApiContinuationRegistry`
+    - native-api option/context/registry interfaces needed to host the service
+      without bridge-specific imports
+  - explicitly keep out of the first public surface:
+    - bridge command routing
+    - WeChat delivery/runtime types
+    - provider profile loading helpers that are only meaningful inside the
+      CodexBridge monorepo bootstrap path
 - [x] Ensure localhost server startup can work without requiring WeChat/Telegram
   bridge runtime
   - landed early via `src/providers/codex/native_api_service.ts` plus the
     `codex native-api-serve` CLI entrypoint
-- [ ] Add package-level tests and exports once extraction begins
+- [x] Add package-level tests and exports once extraction begins
+  - extraction has now started with:
+    - `packages/codex-native-api/package.json`
+    - `packages/codex-native-api/tsconfig.json`
+    - `packages/codex-native-api/src/index.ts`
+    - `packages/codex-native-api/test/package_exports.test.ts`
+  - root native-api entry files under `src/providers/codex/native_*` now act as
+    re-export shims into the package source during the first extraction phase
 
 ## Suggested Phase 1 Deliverable
 
@@ -709,14 +877,14 @@ Phase 1 should be considered complete when all of the following are true:
 
 ## Completion Criteria
 
-- [ ] Codex Native API can expose logged-in Codex as a localhost Responses API
-- [ ] Main WeChat chat flow remains unchanged
-- [ ] Internal isolated tasks can prefer native API without polluting the main
+- [x] Codex Native API can expose logged-in Codex as a localhost Responses API
+- [x] Main WeChat chat flow remains unchanged
+- [x] Internal isolated tasks can prefer native API without polluting the main
   thread
-- [ ] Direct local native fallback exists beneath the API layer before any
+- [x] Direct local native fallback exists beneath the API layer before any
   external-provider fallback is used
-- [ ] External provider fallback remains optional and clearly secondary
-- [ ] The docs clearly distinguish native API from `codex-gateway`
-- [ ] The design stays compatible with later extraction into a reusable
+- [x] External provider fallback remains optional and clearly secondary
+- [x] The docs clearly distinguish native API from `codex-gateway`
+- [x] The design stays compatible with later extraction into a reusable
   workspace package and eventual standalone npm package if the boundary proves
   stable

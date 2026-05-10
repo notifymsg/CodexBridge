@@ -513,6 +513,15 @@ Examples:
 /pd minimax
 ```
 
+Notes:
+
+- `openai-default` remains the user-facing Codex provider choice.
+- When bridge-local Codex Native API is enabled, eligible internal helper tasks
+  under `/pd openai-default` may run through the localhost native API
+  automatically to avoid polluting the main thread.
+- This does **not** introduce a separate user-facing `/provider` choice for the
+  localhost native API.
+
 DeepSeek, MiniMax, Qwen, OpenRouter, Kimi, Gemini, iFlow, and custom compatible APIs all use the same generic `openai-compatible` provider path. Adding one should normally be env configuration plus a capability preset, not a new provider plugin.
 
 The OpenAI-compatible adapter follows the CLIProxyAPI-style split:

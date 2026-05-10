@@ -43,6 +43,78 @@ localhost API facade over logged-in Codex
 
 It should not be described as "minting a real OpenAI API key".
 
+## Current Closure Policy
+
+The current implementation already contains some provider-selectable localhost
+API seams because it reused the existing CodexBridge provider-profile and
+provider-plugin infrastructure.
+
+That generalized shape is not the current closure target.
+
+For the current closure phase, the intended product target should be read as:
+
+```text
+openai-default / logged-in Codex app-server -> localhost API
+```
+
+Meaning:
+
+- current closure work should focus on the logged-in Codex subscription path
+- current closure work should not keep expanding Qwen / MiniMax / DeepSeek
+  specific localhost-native behavior
+- existing generalized hooks may remain in the codebase temporarily, but they
+  are frozen implementation seams, not the active product goal
+- if a true provider-selectable local API is still wanted later, it should
+  return as a separate explicit expansion step instead of silently redefining
+  the meaning of "Codex Native API"
+
+In short:
+
+- do not delete the generalized seams yet
+- do not keep expanding them during current closure
+- finish Codex subscription -> localhost API first
+
+## Minimal Operational Shape
+
+For the current closure phase, the minimum supported localhost service shape is:
+
+- host: `127.0.0.1`
+- port: `43182` by default
+- auth: optional bearer token via `CODEX_NATIVE_API_AUTH_TOKEN`
+- default backend target: `openai-default` / logged-in Codex app-server
+
+Recommended env block:
+
+```env
+CODEX_NATIVE_API_ENABLE=1
+CODEX_NATIVE_API_HOST=127.0.0.1
+CODEX_NATIVE_API_PORT=43182
+CODEX_NATIVE_API_AUTH_TOKEN=replace-with-a-long-random-secret
+CODEX_NATIVE_API_DEFAULT_MODEL=gpt-5.4
+```
+
+Minimal startup commands:
+
+```bash
+pnpm exec tsx src/cli.ts codex native-api-serve
+```
+
+```bash
+CODEX_NATIVE_API_ENABLE=1 pnpm exec tsx src/cli.ts weixin serve
+```
+
+Minimal health checks:
+
+```bash
+curl -H "Authorization: Bearer $CODEX_NATIVE_API_AUTH_TOKEN" \
+  http://127.0.0.1:43182/v1/health
+```
+
+```bash
+curl -H "Authorization: Bearer $CODEX_NATIVE_API_AUTH_TOKEN" \
+  http://127.0.0.1:43182/v1/models
+```
+
 ## Packaging Direction
 
 The target capability is independent enough that it should eventually be able
@@ -96,6 +168,31 @@ extract them into a dedicated workspace package, likely shaped as:
 packages/codex-native-api
 ```
 
+Reason:
+
+- CodexBridge can keep consuming the package
+- the boundary becomes testable and reusable
+- the feature no longer has to remain buried inside bridge-specific files
+
+Current extraction decision:
+
+- the first extraction should remain a **single**
+  `packages/codex-native-api` package
+- do **not** split runtime/server yet
+- the first extraction has now started in-place:
+  - `packages/codex-native-api/src/` holds the initial extracted module bodies
+  - `src/providers/codex/native_*` acts as the current compatibility shim layer
+    back into the package source
+
+Why this is the current decision:
+
+- `native_runtime`, `native_api_server`, `native_api_service`,
+  `native_api_side_task_router`, and the continuation registry still share one
+  localhost contract and one Codex-only closure target
+- they also still share one lifecycle and one auth/config surface
+- splitting too early would freeze an artificial boundary before a second real
+  consumer proves that the runtime substrate is useful without the HTTP shell
+
 Optional later split if needed:
 
 ```text
@@ -103,11 +200,12 @@ packages/codex-native-runtime
 packages/codex-native-api
 ```
 
-Reason:
+Only revisit that split if:
 
-- CodexBridge can keep consuming the package
-- the boundary becomes testable and reusable
-- the feature no longer has to remain buried inside bridge-specific files
+- another consumer needs the native runtime substrate directly without the
+  localhost API shell, or
+- package extraction shows a stable server-free runtime API that no longer
+  depends on the current localhost contract assumptions
 
 ### Stage C: Standalone npm package / separate repository if justified
 
@@ -176,6 +274,57 @@ Recommended degraded route order:
 1. `Codex Native API`
 2. direct native isolated ephemeral-thread execution
 3. external provider fallback via `@codexbridge/codex-gateway`
+
+Current closure interpretation:
+
+- for this workstream, `Codex Native API` should be read first as the
+  `openai-default` / logged-in Codex path
+- any generalized provider-selectable localhost routing that already exists is
+  frozen and secondary until the Codex-only path is fully closed
+
+## Current Internal Consumption Boundary
+
+For the current closure phase, internal helper consumption should follow these
+rules:
+
+### Prefer localhost native API
+
+Only when all of the following are true:
+
+- bridge-local native API routing is enabled
+- the task class is eligible
+- the bound provider profile is `openai-native` / `openai-default`
+
+First helper lanes already routed through that boundary:
+
+- command-skill parsing
+- review result localization
+- agent result verification
+
+User-facing provider selection stays unchanged:
+
+- users keep `/pd openai-default`
+- the localhost native API is an internal execution surface behind that
+  provider, not a separate `/provider` option
+- do not introduce a user-facing `/pd codex-native-local` style profile for
+  the current closure phase
+
+### Stay on direct native execution
+
+When any of the following are true:
+
+- localhost native API routing is disabled
+- localhost native API is unreachable or unhealthy
+- the task class is not enabled for localhost routing
+
+### Stay off the current native localhost path
+
+For the current closure phase:
+
+- Qwen / MiniMax / DeepSeek and other non-native provider profiles should not
+  start using the localhost native API path
+- the main WeChat chat lane should remain on the existing direct app-server
+  conversation path
 
 ## Non-Goals for Phase 1
 
@@ -758,3 +907,81 @@ It should not own:
 - local auth hardening
 - fixture/regression coverage
 - optional external local-client consumers
+
+Current response-level observability is now carried in a dedicated `native_api`
+envelope on health, models, responses, and chat-completions payloads. The
+current machine-readable fields are:
+
+- `route_path`
+- `request_target`
+- `response_mapping`
+- `continuation`
+
+The current hardening baseline also covers:
+
+- continuation mapping
+- streaming event ordering
+- localhost bearer auth / localhost-only assumptions
+- runtime recovery after a temporary Codex app-server outage
+
+## Current Persistence Decision
+
+Persisted continuation recovery is **not** part of the current Codex-only
+closure target.
+
+The current service shape is intentionally process-local:
+
+- the default continuation registry remains in-memory
+- service restart may invalidate outstanding continuation chains
+- callers receive `continuation_not_found` instead of silent re-homing or fake
+  replay
+
+That trade-off is still preferred for the current phase because:
+
+- the target product is a localhost Codex-subscription facade, not a durable
+  multi-consumer runtime
+- restart semantics and failure visibility are now explicit and tested
+- response-level observability already exposes enough routing/mapping metadata
+  to debug broken continuation chains
+- durable continuation storage would add schema/state migration work before the
+  extraction boundary is stable
+
+This decision should only be reopened if a second real consumer needs
+restart-stable continuations, or if package extraction hardens into a reusable
+multi-process runtime surface.
+
+## Current Extraction Boundary Status
+
+The native-api sublayer has now reduced its direct bridge-UX type coupling:
+
+- `src/providers/codex/native_runtime.ts`
+- `src/providers/codex/native_api_continuation_registry.ts`
+- `src/providers/codex/native_api_side_task_router.ts`
+
+use provider-local native-api types instead of importing `BridgeSession`,
+`SessionSettings`, or `InboundTextEvent` directly from the bridge
+core/platform modules.
+
+The shared provider contract has now been moved onto provider-owned turn,
+session, event, and artifact-delivery shapes as well, so
+`src/types/provider.ts` no longer leaks bridge-owned `core/platform` types into
+the native-api helper boundary.
+
+That means the remaining extraction work is no longer about bridge-owned type
+leakage. It is now about package topology and public API design:
+
+- the first extraction should remain a single
+  `packages/codex-native-api` package
+- and the first public surface should stay intentionally small:
+  - `CodexNativeRuntime`
+  - `CodexNativeApiServer`
+  - `CodexNativeApiService`
+  - `InMemoryCodexNativeApiContinuationRegistry`
+  - supporting native-api option/context/registry interfaces that do not pull
+    bridge-owned runtime or WeChat types back across the boundary
+
+The first extraction also now has package-level exports/tests in place:
+
+- `packages/codex-native-api/src/index.ts`
+- `packages/codex-native-api/package.json`
+- `packages/codex-native-api/test/package_exports.test.ts`

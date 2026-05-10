@@ -20,6 +20,9 @@ import { OpenAICompatibleProviderPlugin } from './providers/openai_compatible/pl
 import { WeixinBridgeRuntime } from './runtime/weixin_bridge_runtime.js';
 import { createI18n } from './i18n/index.js';
 
+const CLI_FILE = fileURLToPath(import.meta.url);
+const REPO_ROOT = path.resolve(path.dirname(CLI_FILE), '..');
+
 interface WeixinLoginArgs {
   baseUrl: string | null;
   stateDir: string | null;
@@ -52,6 +55,16 @@ interface CodexNativeApiServeArgs {
   providerProfileId: string | null;
 }
 
+interface EmbeddedCodexNativeApiOptions {
+  enabled: boolean;
+  host: string;
+  port: number;
+  providerProfileId: string;
+  authToken: string | null;
+  defaultModel: string | null;
+  requestTitlePrefix: string | null;
+}
+
 interface ServeLockPayload {
   pid: number;
   startedAt: string;
@@ -74,6 +87,7 @@ const DEFAULT_CODEX_NATIVE_API_HOST = '127.0.0.1';
 const DEFAULT_CODEX_NATIVE_API_PORT = 43182;
 
 async function main(argv: string[] = process.argv.slice(2)) {
+  loadRepoEnvDefaults();
   const [group, command, ...args] = argv;
   if (group === 'weixin' && command === 'login') {
     return runWeixinLogin(args);
@@ -228,12 +242,34 @@ async function runWeixinServe(args: string[]) {
     }) as any,
     locale: i18n.locale,
   } as any);
+  const embeddedNativeApiOptions = resolveEmbeddedCodexNativeApiOptions({
+    env: process.env,
+    defaultProviderProfileId: runtime.config.defaultProviderProfileId,
+  });
+  const nativeApi = embeddedNativeApiOptions.enabled
+    ? new CodexNativeApiService({
+      providerProfiles: runtime.repositories.providerProfiles,
+      providerRegistry: runtime.registry,
+      defaultProviderProfileId: runtime.config.defaultProviderProfileId,
+      providerProfileId: embeddedNativeApiOptions.providerProfileId,
+      authPath: codexAuthManager.authPath,
+      env: process.env,
+      host: embeddedNativeApiOptions.host,
+      port: embeddedNativeApiOptions.port,
+      authToken: embeddedNativeApiOptions.authToken,
+      defaultModel: embeddedNativeApiOptions.defaultModel,
+      defaultCwd,
+      defaultLocale: i18n.locale,
+      requestTitlePrefix: embeddedNativeApiOptions.requestTitlePrefix,
+    })
+    : null;
 
   process.stdout.write(`${i18n.t('cli.serve.starting')}\n`);
   process.stdout.write(`state_dir: ${stateDir}\n`);
   process.stdout.write(`default_provider_profile: ${runtime.config.defaultProviderProfileId}\n`);
   process.stdout.write(`serve_lock: ${serveLock.lockPath}\n`);
   process.stdout.write(`${i18n.t('cli.serve.defaultCwd', { value: runtime.config.defaultCwd ?? i18n.t('common.none') })}\n`);
+  process.stdout.write(`native_api_enabled: ${nativeApi ? 'true' : 'false'}\n`);
 
   let stopped = false;
   process.once('exit', () => {
@@ -247,7 +283,9 @@ async function runWeixinServe(args: string[]) {
     process.stdout.write(`${i18n.t('cli.serve.stopping', { signal })}\n`);
     try {
       await bridgeRuntime.stop();
+      await nativeApi?.stop().catch(() => {});
     } finally {
+      await stopRuntimeProviderPlugins(runtime.registry.listProviders());
       await serveLock.release();
       process.exit(0);
     }
@@ -261,8 +299,17 @@ async function runWeixinServe(args: string[]) {
       stateDir,
       platformPlugin,
     });
+    if (nativeApi) {
+      const binding = await nativeApi.start();
+      process.stdout.write(`native_api_base_url: ${nativeApi.baseUrl}\n`);
+      process.stdout.write(`native_api_provider_profile: ${binding.providerProfileId}\n`);
+      process.stdout.write(`native_api_provider_kind: ${binding.providerKind}\n`);
+      process.stdout.write(`native_api_auth_mode: ${embeddedNativeApiOptions.authToken ? i18n.t('common.enabled') : i18n.t('common.disabled')}\n`);
+    }
     await bridgeRuntime.start();
   } finally {
+    await nativeApi?.stop().catch(() => {});
+    await stopRuntimeProviderPlugins(runtime.registry.listProviders());
     await serveLock.release();
   }
 }
@@ -952,6 +999,32 @@ function normalizeCliString(value: unknown): string | null {
   return normalized || null;
 }
 
+function resolveEmbeddedCodexNativeApiOptions({
+  env,
+  defaultProviderProfileId,
+}: {
+  env: NodeJS.ProcessEnv;
+  defaultProviderProfileId: string | null;
+}): EmbeddedCodexNativeApiOptions {
+  const enabled = parseBooleanEnv(env.CODEX_NATIVE_API_ENABLE);
+  const host = normalizeCliString(env.CODEX_NATIVE_API_HOST) ?? DEFAULT_CODEX_NATIVE_API_HOST;
+  const port = parseOptionalNonNegativeInt(env.CODEX_NATIVE_API_PORT) ?? DEFAULT_CODEX_NATIVE_API_PORT;
+  const preferredCodexProviderProfileId = defaultProviderProfileId === 'openai-default'
+    ? defaultProviderProfileId
+    : null;
+  const providerProfileId = preferredCodexProviderProfileId
+    ?? 'openai-default';
+  return {
+    enabled,
+    host,
+    port,
+    providerProfileId,
+    authToken: normalizeCliString(env.CODEX_NATIVE_API_AUTH_TOKEN),
+    defaultModel: normalizeCliString(env.CODEX_NATIVE_API_DEFAULT_MODEL),
+    requestTitlePrefix: normalizeCliString(env.CODEX_NATIVE_API_TITLE_PREFIX),
+  };
+}
+
 function parseOptionalNonNegativeInt(value: unknown): number | null {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -960,8 +1033,58 @@ function parseOptionalNonNegativeInt(value: unknown): number | null {
   return parsed;
 }
 
-const thisFile = fileURLToPath(import.meta.url);
-if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
+function parseBooleanEnv(value: unknown): boolean {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === '1'
+    || normalized === 'true'
+    || normalized === 'yes'
+    || normalized === 'on';
+}
+
+function loadRepoEnvDefaults() {
+  const combined = {
+    ...parseEnvFile(path.join(REPO_ROOT, '.env')),
+    ...parseEnvFile(path.join(REPO_ROOT, '.env.local')),
+  };
+  for (const [key, value] of Object.entries(combined)) {
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
+
+function parseEnvFile(filePath: string): Record<string, string> {
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+  const content = fs.readFileSync(filePath, 'utf8');
+  const env: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const index = line.indexOf('=');
+    if (index <= 0) {
+      continue;
+    }
+    const key = line.slice(0, index).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
+      continue;
+    }
+    let value = line.slice(index + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"'))
+      || (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === CLI_FILE) {
   await main();
 }
 
@@ -976,6 +1099,7 @@ export {
   pendingRestartNotificationsFile,
   parseCodexCleanupInternalThreadsArgs,
   parseCodexNativeApiServeArgs,
+  resolveEmbeddedCodexNativeApiOptions,
   parseWeixinClearContextArgs,
   parseWeixinLoginArgs,
   parseWeixinServeArgs,

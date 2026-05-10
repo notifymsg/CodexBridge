@@ -158,6 +158,10 @@ test('CodexNativeApiServer exposes /v1/health with request-scoped readiness and 
     assert.equal(body.object, 'health.check');
     assert.equal(body.status, 'ok');
     assert.equal(body.localhost_only, true);
+    assert.equal(body.native_api.route_path, '/v1/health');
+    assert.equal(body.native_api.request_target.provider_profile_id, 'openai-default');
+    assert.equal(body.native_api.request_target.provider_kind, 'codex');
+    assert.equal(body.native_api.continuation.resumed, false);
     assert.equal(body.route_capabilities.responses.create, true);
     assert.equal(body.route_capabilities.responses.continuation, true);
     assert.equal(body.route_capabilities.responses.stream, true);
@@ -253,6 +257,12 @@ test('CodexNativeApiServer exposes /v1/chat/completions through the isolated nat
     assert.equal(body.id, 'chatcmpl_native_1');
     assert.equal(body.object, 'chat.completion');
     assert.equal(body.model, 'gpt-5.5');
+    assert.equal(body.native_api.route_path, '/v1/chat/completions');
+    assert.equal(body.native_api.request_target.provider_profile_id, 'openai-default');
+    assert.equal(body.native_api.response_mapping.chat_completion_id, 'chatcmpl_native_1');
+    assert.equal(body.native_api.response_mapping.bridge_session_id, 'session-native-chat-1');
+    assert.equal(body.native_api.response_mapping.native_thread_id, 'thread-native-chat-1');
+    assert.equal(body.native_api.continuation.resumed, false);
     assert.equal(body.choices[0].message.role, 'assistant');
     assert.equal(body.choices[0].message.content, 'compat answer');
     assert.equal(body.choices[0].finish_reason, 'stop');
@@ -478,6 +488,107 @@ test('CodexNativeApiServer reports degraded /v1/health when the native auth stat
   }
 });
 
+test('CodexNativeApiServer recovers after the native runtime becomes reachable again', async () => {
+  let runtimeReachable = false;
+  let startTurnCalls = 0;
+  const runtime = new CodexNativeRuntime({
+    now: () => 556,
+    createSessionId: () => 'session-native-recover-1',
+    readAccountIdentity: () => ({
+      email: 'native@example.com',
+      name: 'Native Runtime',
+      authMode: 'chatgpt',
+      accountId: 'acc_native',
+      plan: 'plus',
+      authPath: '/tmp/auth.json',
+    }),
+  });
+  const providerPlugin = {
+    async listModels() {
+      if (!runtimeReachable) {
+        throw new Error('app-server restarting');
+      }
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: 'Frontier coding model.',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+    async startThread(params: any) {
+      return {
+        threadId: 'thread-native-recover-1',
+        cwd: params.cwd,
+        title: params.title,
+      };
+    },
+    async startTurn(params: any) {
+      startTurnCalls += 1;
+      return {
+        outputText: 'recovered answer',
+        previewText: '',
+        threadId: params.bridgeSession.codexThreadId,
+        turnId: 'turn-native-recover-1',
+      };
+    },
+  } as any;
+  const server = new CodexNativeApiServer({
+    runtime,
+    resolveRuntimeContext: () => ({
+      providerProfile: makeProfile(),
+      providerPlugin,
+    }),
+  });
+  await server.start();
+  try {
+    const degradedHealth = await fetch(`${server.baseUrl}/v1/health`);
+    const degradedBody = await degradedHealth.json() as any;
+    assert.equal(degradedHealth.status, 503);
+    assert.equal(degradedBody.status, 'unavailable');
+    assert.equal(degradedBody.native_runtime.runtime_reachable, false);
+    assert.match(degradedBody.native_runtime.error_message, /app-server restarting/i);
+
+    const unavailableResponse = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: 'Are you back yet?',
+      }),
+    });
+    const unavailableBody = await unavailableResponse.json() as any;
+    assert.equal(unavailableResponse.status, 503);
+    assert.equal(unavailableBody.error.code, 'native_runtime_unavailable');
+    assert.equal(startTurnCalls, 0);
+
+    runtimeReachable = true;
+
+    const recoveredHealth = await fetch(`${server.baseUrl}/v1/health`);
+    const recoveredHealthBody = await recoveredHealth.json() as any;
+    assert.equal(recoveredHealth.status, 200);
+    assert.equal(recoveredHealthBody.status, 'ok');
+    assert.equal(recoveredHealthBody.native_runtime.runtime_reachable, true);
+    assert.equal(recoveredHealthBody.native_runtime.ready, true);
+
+    const recoveredResponse = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: 'Now answer.',
+      }),
+    });
+    const recoveredBody = await recoveredResponse.json() as any;
+    assert.equal(recoveredResponse.status, 200);
+    assert.equal(recoveredBody.output[0].content[0].text, 'recovered answer');
+    assert.equal(recoveredBody.native_api.response_mapping.bridge_session_id, 'session-native-recover-1');
+    assert.equal(startTurnCalls, 1);
+  } finally {
+    await server.stop();
+  }
+});
+
 test('CodexNativeApiServer routes /v1/responses through isolated native runtime execution', async () => {
   const calls: Array<{ kind: string; payload: any }> = [];
   const runtime = new CodexNativeRuntime({
@@ -694,6 +805,12 @@ test('CodexNativeApiServer continues the same isolated native thread via previou
     const initialBody = await initial.json() as any;
     assert.equal(initial.status, 200);
     assert.equal(initialBody.id, 'resp_native_api_1');
+    assert.equal(initialBody.native_api.route_path, '/v1/responses');
+    assert.equal(initialBody.native_api.request_target.provider_profile_id, 'openai-default');
+    assert.equal(initialBody.native_api.response_mapping.response_id, 'resp_native_api_1');
+    assert.equal(initialBody.native_api.response_mapping.bridge_session_id, 'session-native-api-1');
+    assert.equal(initialBody.native_api.response_mapping.native_thread_id, 'thread-native-api-1');
+    assert.equal(initialBody.native_api.continuation.resumed, false);
     assert.equal(initialBody.output[0].content[0].text, 'initial answer');
 
     now = 501_000;
@@ -711,6 +828,14 @@ test('CodexNativeApiServer continues the same isolated native thread via previou
     assert.equal(followup.status, 200);
     assert.equal(followupBody.id, 'resp_native_api_2');
     assert.equal(followupBody.previous_response_id, 'resp_native_api_1');
+    assert.equal(followupBody.native_api.route_path, '/v1/responses');
+    assert.equal(followupBody.native_api.response_mapping.response_id, 'resp_native_api_2');
+    assert.equal(followupBody.native_api.response_mapping.previous_response_id, 'resp_native_api_1');
+    assert.equal(followupBody.native_api.response_mapping.bridge_session_id, 'session-native-api-1');
+    assert.equal(followupBody.native_api.continuation.resumed, true);
+    assert.equal(followupBody.native_api.continuation.source_response_id, 'resp_native_api_1');
+    assert.equal(followupBody.native_api.continuation.source_bridge_session_id, 'session-native-api-1');
+    assert.equal(followupBody.native_api.continuation.source_native_thread_id, 'thread-native-api-1');
     assert.equal(followupBody.output[0].content[0].text, 'follow-up answer');
     assert.equal(followupBody.native_runtime.thread_id, 'thread-native-api-1');
     assert.equal(followupBody.native_runtime.bridge_session_id, 'session-native-api-1');
@@ -830,6 +955,11 @@ test('CodexNativeApiServer streams /v1/responses as SSE events over the native r
     const completed = events.at(-1)?.data?.response;
     assert.equal(completed.id, 'resp_native_api_stream_1');
     assert.equal(completed.status, 'completed');
+    assert.equal(completed.native_api.route_path, '/v1/responses');
+    assert.equal(completed.native_api.response_mapping.response_id, 'resp_native_api_stream_1');
+    assert.equal(completed.native_api.response_mapping.bridge_session_id, 'session-native-api-stream-1');
+    assert.equal(completed.native_api.response_mapping.native_thread_id, 'thread-native-api-stream-1');
+    assert.equal(completed.native_api.continuation.resumed, false);
     assert.equal(completed.output[0].type, 'reasoning');
     assert.equal(completed.output[0].summary[0].text, 'Thinking aloud.');
     assert.equal(completed.output[1].type, 'message');
