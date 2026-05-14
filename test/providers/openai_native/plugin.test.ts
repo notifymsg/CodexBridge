@@ -64,7 +64,7 @@ test('OpenAINativeProviderPlugin delegates thread creation through CodexProvider
   ]);
 });
 
-test('OpenAINativeProviderPlugin leaves the model unset unless the bridge session explicitly selects one', async () => {
+test('OpenAINativeProviderPlugin uses the Codex default model when the bridge session does not explicitly select one', async () => {
   const calls: any[] = [];
   const plugin = new OpenAINativeProviderPlugin({
     clientFactory: () => ({
@@ -131,8 +131,10 @@ test('OpenAINativeProviderPlugin leaves the model unset unless the bridge sessio
 
   assert.deepEqual(calls, [
     ['start'],
-    ['startThread', null],
+    ['listModels'],
+    ['startThread', 'gpt-5.1-codex-max'],
     ['start'],
-    ['startTurn', null],
+    ['listModels'],
+    ['startTurn', 'gpt-5.1-codex-max'],
   ]);
 });

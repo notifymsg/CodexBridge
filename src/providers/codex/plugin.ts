@@ -629,9 +629,6 @@ export class CodexProviderPlugin {
         defaultReasoningEffort: null,
       };
     }
-    if (providerProfile.providerKind === 'openai-native') {
-      return null;
-    }
     const models = await client.listModels();
     return models.find((model) => model.isDefault)
       ?? models[0]

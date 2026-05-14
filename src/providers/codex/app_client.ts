@@ -680,7 +680,8 @@ export class CodexAppClient extends EventEmitter {
           }],
       ),
     });
-    const result: any = await this.request('turn/start', {
+    const sandboxPolicy = mapSandboxPolicy(sandboxMode);
+    const requestPayload: Record<string, unknown> = {
       threadId,
       input: Array.isArray(input) && input.length > 0
         ? input
@@ -691,20 +692,35 @@ export class CodexAppClient extends EventEmitter {
         }],
       cwd,
       approvalPolicy,
-      sandboxPolicy: mapSandboxPolicy(sandboxMode),
-      model,
-      serviceTier,
-      effort,
-      summary: null,
-      personality,
-      outputSchema: null,
+      sandboxPolicy,
+      settings: {
+        approvalPolicy,
+        sandboxPolicy,
+      },
       collaborationMode: serializeCollaborationMode({
         collaborationMode,
         model,
         effort,
         developerInstructions,
       }),
-    }, { timeoutMs: 30_000 });
+    };
+    if (typeof model === 'string' && model.trim()) {
+      requestPayload.model = model;
+      (requestPayload.settings as Record<string, unknown>).model = model;
+    }
+    if (typeof serviceTier === 'string' && serviceTier.trim()) {
+      requestPayload.serviceTier = serviceTier;
+      (requestPayload.settings as Record<string, unknown>).serviceTier = serviceTier;
+    }
+    if (typeof effort === 'string' && effort.trim()) {
+      requestPayload.effort = effort;
+      (requestPayload.settings as Record<string, unknown>).reasoningEffort = effort;
+    }
+    if (typeof personality === 'string' && personality.trim()) {
+      requestPayload.personality = personality;
+      (requestPayload.settings as Record<string, unknown>).personality = personality;
+    }
+    const result: any = await this.request('turn/start', requestPayload, { timeoutMs: 30_000 });
     const turn = result?.turn;
     if (!turn?.id) {
       throw new Error('Codex turn/start returned no turn id');
@@ -2496,9 +2512,11 @@ function serializeCollaborationMode({ collaborationMode, model, effort, develope
     return null;
   }
   const settings: any = {
-    model,
     developer_instructions: developerInstructions,
   };
+  if (typeof model === 'string' && model.trim()) {
+    settings.model = model;
+  }
   if (effort) {
     settings.reasoning_effort = effort;
   }
@@ -2613,11 +2631,12 @@ function summarizeRpcParams(method: string, params: any) {
       return {
         threadId: String(params?.threadId ?? ''),
         cwd: params?.cwd ?? null,
-        model: params?.model ?? null,
-        serviceTier: params?.serviceTier ?? null,
-        effort: params?.effort ?? null,
-        approvalPolicy: params?.approvalPolicy ?? null,
+        model: typeof params?.model === 'string' ? params.model : null,
+        serviceTier: typeof params?.serviceTier === 'string' ? params.serviceTier : null,
+        effort: typeof params?.effort === 'string' ? params.effort : null,
+        approvalPolicy: typeof params?.approvalPolicy === 'string' ? params.approvalPolicy : null,
         sandboxPolicy: params?.sandboxPolicy ?? null,
+        settings: summarizePlainObject(params?.settings ?? null),
         collaborationMode: params?.collaborationMode?.mode ?? null,
         inputSummary: summarizeTurnInput(Array.isArray(params?.input) ? params.input : []),
       };

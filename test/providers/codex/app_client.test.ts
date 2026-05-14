@@ -497,12 +497,69 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
       developer_instructions: '',
     },
   });
+  assert.deepEqual(turnStart.settings, {
+    approvalPolicy: 'on-request',
+    sandboxPolicy: {
+      type: 'workspaceWrite',
+    },
+    model: 'gpt-5.4',
+    reasoningEffort: 'medium',
+  });
   assert.deepEqual(turnStart.input, [{
     type: 'text',
     text: 'hello',
     text_elements: [],
   }]);
-  assert.equal(turnStart.personality, null);
+  assert.equal('personality' in turnStart, false);
+});
+
+test('CodexAppClient startTurn omits null collaboration setting strings', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push([method, params]);
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-2' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-2',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    collaborationMode: 'default',
+    timeoutMs: 10,
+  });
+
+  assert.equal(result.outputText, 'done');
+  const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
+  assert.deepEqual(turnStart.collaborationMode, {
+    mode: 'default',
+    settings: {
+      developer_instructions: '',
+    },
+  });
+  assert.equal('model' in turnStart, false);
+  assert.equal('effort' in turnStart, false);
 });
 
 test('CodexAppClient startTurn forwards explicit local-image input arrays unchanged', async () => {
