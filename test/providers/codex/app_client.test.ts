@@ -3274,6 +3274,46 @@ test('CodexAppClient surfaces exhausted subscription credits from session rate l
   assert.equal(result.errorMessage, 'Codex subscription credits are exhausted (premium balance 0).');
 });
 
+test('CodexAppClient returns provider_error immediately when an error notification arrives for the active stdio turn', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  client.transportKind = 'stdio';
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      setTimeout(() => {
+        client.emit('notification', {
+          method: 'error',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            error: {
+              message: 'HTTP 503 Service Unavailable',
+            },
+          },
+        });
+      }, 0);
+      return { turn: { id: 'turn-1' } };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'provider_error');
+  assert.equal(result.finalSource, 'notification_error');
+  assert.equal(result.errorMessage, 'HTTP 503 Service Unavailable');
+});
+
 test('CodexAppClient returns partial commentary instead of timing out when assistant activity exists without a final answer', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

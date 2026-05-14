@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000;
+const DEFAULT_GLOBAL_FETCH = globalThis.fetch as WeixinOfficialFetch | undefined;
 
 export interface WeixinOfficialTransport {
   baseUrl: string;
@@ -31,6 +32,7 @@ export interface WeixinOfficialTransport {
     text: string;
     contextToken?: string | null;
     clientId: string;
+    timeoutMs?: number;
   }): Promise<SendMessageResp>;
   sendTyping(params: {
     toUserId: string;
@@ -57,7 +59,7 @@ export interface WeixinOfficialTransport {
 export function createWeixinOfficialTransport({
   baseUrl,
   token = null,
-  fetchImpl = globalThis.fetch as WeixinOfficialFetch | undefined,
+  fetchImpl,
   locale = null,
 }: {
   baseUrl: string;
@@ -66,28 +68,33 @@ export function createWeixinOfficialTransport({
   locale?: string | null;
 }): WeixinOfficialTransport {
   const normalizedBaseUrl = String(baseUrl).replace(/\/+$/u, '');
+  const effectiveFetchImpl = fetchImpl
+    ?? (globalThis.fetch !== DEFAULT_GLOBAL_FETCH
+      ? globalThis.fetch as WeixinOfficialFetch | undefined
+      : undefined);
 
   return {
     baseUrl: normalizedBaseUrl,
     token,
-    fetch: fetchImpl,
+    fetch: effectiveFetchImpl,
     locale,
     async getUpdates({ syncCursor = '', timeoutMs = DEFAULT_LONG_POLL_TIMEOUT_MS } = {}) {
       return getUpdates({
         baseUrl: normalizedBaseUrl,
         token,
-        fetchImpl,
+        fetchImpl: effectiveFetchImpl,
         locale,
         timeoutMs,
         get_updates_buf: syncCursor,
       });
     },
-    async sendMessage({ toUserId, text, contextToken = null, clientId }) {
+    async sendMessage({ toUserId, text, contextToken = null, clientId, timeoutMs }) {
       return sendMessage({
         baseUrl: normalizedBaseUrl,
         token,
-        fetchImpl,
+        fetchImpl: effectiveFetchImpl,
         locale,
+        timeoutMs,
         msg: {
           from_user_id: '',
           to_user_id: toUserId,
@@ -108,7 +115,7 @@ export function createWeixinOfficialTransport({
       return sendTyping({
         baseUrl: normalizedBaseUrl,
         token,
-        fetchImpl,
+        fetchImpl: effectiveFetchImpl,
         locale,
         ilink_user_id: toUserId,
         typing_ticket: typingTicket,
@@ -119,7 +126,7 @@ export function createWeixinOfficialTransport({
       return getConfig({
         baseUrl: normalizedBaseUrl,
         token,
-        fetchImpl,
+        fetchImpl: effectiveFetchImpl,
         locale,
         ilink_user_id: userId,
         ...(contextToken ? { context_token: contextToken } : {}),
@@ -128,7 +135,7 @@ export function createWeixinOfficialTransport({
     async getBotQr({ botType = DEFAULT_ILINK_BOT_TYPE } = {}) {
       return getBotQr({
         baseUrl: normalizedBaseUrl,
-        fetchImpl,
+        fetchImpl: effectiveFetchImpl,
         locale,
         botType,
       });
@@ -136,7 +143,7 @@ export function createWeixinOfficialTransport({
     async getQrStatus({ qrcode, baseUrlOverride = null }) {
       return getQrStatus({
         baseUrl: baseUrlOverride ? String(baseUrlOverride).replace(/\/+$/u, '') : normalizedBaseUrl,
-        fetchImpl,
+        fetchImpl: effectiveFetchImpl,
         locale,
         qrcode,
       });
@@ -150,7 +157,7 @@ export function createWeixinOfficialTransport({
         opts: {
           baseUrl: normalizedBaseUrl,
           token,
-          fetchImpl,
+          fetchImpl: effectiveFetchImpl,
           locale,
           contextToken,
         },

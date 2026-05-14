@@ -1,4 +1,6 @@
 import { createI18n } from '../../../i18n/index.js';
+import dns from 'node:dns/promises';
+import https from 'node:https';
 import type {
   BaseInfo,
   GetConfigReq,
@@ -221,12 +223,27 @@ async function requestJson<T>(params: RawRequestOptions & {
   baseUrl: string;
   token?: string | null;
 }): Promise<T> {
-  const i18n = createI18n(params.locale);
-  const fetchImpl = params.fetchImpl ?? (globalThis.fetch as WeixinOfficialFetch | undefined);
-  if (typeof fetchImpl !== 'function') {
+  const fetchImpl = params.fetchImpl;
+  if (fetchImpl !== undefined && typeof fetchImpl !== 'function') {
+    const i18n = createI18n(params.locale);
     throw new Error(i18n.t('platform.weixin.official.missingFetchImplementation'));
   }
 
+  if (fetchImpl) {
+    return requestJsonWithFetch<T>({
+      ...params,
+      fetchImpl,
+    });
+  }
+  return requestJsonWithAddressRotation<T>(params);
+}
+
+async function requestJsonWithFetch<T>(params: RawRequestOptions & {
+  baseUrl: string;
+  token?: string | null;
+  fetchImpl: WeixinOfficialFetch;
+}): Promise<T> {
+  const i18n = createI18n(params.locale);
   const abortController = new AbortController();
   const timer = setTimeout(() => abortController.abort(), params.timeoutMs);
   const startTime = Date.now();
@@ -239,7 +256,7 @@ async function requestJson<T>(params: RawRequestOptions & {
   });
 
   try {
-    const response = await fetchImpl(joinUrl(params.baseUrl, params.endpoint), {
+    const response = await params.fetchImpl(joinUrl(params.baseUrl, params.endpoint), {
       method: params.method,
       body: params.body,
       signal: abortController.signal,
@@ -279,6 +296,182 @@ async function requestJson<T>(params: RawRequestOptions & {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function requestJsonWithAddressRotation<T>(params: RawRequestOptions & {
+  baseUrl: string;
+  token?: string | null;
+}): Promise<T> {
+  const i18n = createI18n(params.locale);
+  const url = new URL(joinUrl(params.baseUrl, params.endpoint));
+  const addresses = await resolveHostAddresses(url.hostname);
+  const startTime = Date.now();
+  const deadline = startTime + params.timeoutMs;
+  let lastError: unknown = null;
+  debugWeixinHttp('request_start', {
+    method: params.method,
+    endpoint: params.endpoint,
+    timeoutMs: params.timeoutMs,
+    authorized: params.authorized ?? true,
+    bodyLength: typeof params.body === 'string' ? Buffer.byteLength(params.body, 'utf8') : 0,
+  });
+
+  for (const address of addresses) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    try {
+      const response = await requestJsonOverHttpsAddress({
+        url,
+        address,
+        params,
+        timeoutMs: Math.min(20_000, remainingMs),
+      });
+      debugWeixinHttp('request_end', {
+        method: params.method,
+        endpoint: params.endpoint,
+        status: response.status,
+        ok: response.status >= 200 && response.status < 300,
+        durationMs: Date.now() - startTime,
+        responseLength: response.raw.length,
+        responsePreview: previewResponse(response.raw),
+      });
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(i18n.t('platform.weixin.official.ilinkHttpError', {
+          method: params.method,
+          endpoint: params.endpoint,
+          status: response.status,
+          response: response.raw.slice(0, 200),
+        }));
+      }
+      return response.raw ? JSON.parse(response.raw) as T : {} as T;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableNetworkError(error)) {
+        break;
+      }
+      debugWeixinHttp('request_retry', {
+        method: params.method,
+        endpoint: params.endpoint,
+        address,
+        elapsedMs: Date.now() - startTime,
+        error: error instanceof Error ? (error.stack || error.message) : String(error),
+      });
+    }
+  }
+
+  debugWeixinHttp('request_error', {
+    method: params.method,
+    endpoint: params.endpoint,
+    durationMs: Date.now() - startTime,
+    error: lastError instanceof Error ? (lastError.stack || lastError.message) : String(lastError ?? 'unknown error'),
+  });
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  throw new Error(String(lastError ?? 'Weixin request failed'));
+}
+
+async function resolveHostAddresses(hostname: string): Promise<string[]> {
+  try {
+    const records = await dns.lookup(hostname, { all: true });
+    const addresses = records
+      .map((record) => record.address)
+      .filter((address) => typeof address === 'string' && address.trim());
+    return [...new Set(addresses)].length > 0 ? [...new Set(addresses)] : [hostname];
+  } catch {
+    return [hostname];
+  }
+}
+
+function requestJsonOverHttpsAddress({
+  url,
+  address,
+  params,
+  timeoutMs,
+}: {
+  url: URL;
+  address: string;
+  params: RawRequestOptions & {
+    baseUrl: string;
+    token?: string | null;
+  };
+  timeoutMs: number;
+}): Promise<{ status: number; raw: string }> {
+  const headers = buildHeaders({
+    token: params.token ?? null,
+    authorized: params.authorized ?? true,
+    extraHeaders: {
+      ...(params.headers ?? {}),
+      Host: url.hostname,
+    },
+  });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const request = https.request({
+      protocol: 'https:',
+      hostname: address,
+      port: url.port ? Number(url.port) : 443,
+      method: params.method,
+      path: `${url.pathname}${url.search}`,
+      headers,
+      servername: url.hostname,
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      response.on('end', () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve({
+          status: Number(response.statusCode ?? 0),
+          raw: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      const error = new Error(`HTTPS request timed out after ${timeoutMs}ms`);
+      (error as NodeJS.ErrnoException).code = 'ETIMEDOUT';
+      request.destroy(error);
+    }, timeoutMs);
+
+    request.on('error', (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    if (params.body) {
+      request.write(params.body);
+    }
+    request.end();
+  });
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  const code = typeof error === 'object' && error && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+  return [
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ETIMEDOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+  ].includes(code);
 }
 
 function joinUrl(baseUrl: string, endpoint: string): string {

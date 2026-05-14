@@ -1555,9 +1555,16 @@ export class CodexAppClient extends EventEmitter {
     };
     const itemOutputKinds = new Map();
     let sawTerminalNotification = false;
+    let terminalRuntimeError: string | null = null;
     const onNotification = (notification) => {
       if (isTerminalNotificationForThread(notification, threadId, turnId)) {
         sawTerminalNotification = true;
+      }
+      if (isErrorNotificationForThreadTurn(notification, threadId, turnId)) {
+        terminalRuntimeError = extractNotificationErrorMessage(notification)
+          ?? 'Codex app-server reported an error for this turn';
+        sawTerminalNotification = true;
+        return;
       }
       const progress = extractProgressUpdate(notification, turnId, itemOutputKinds, progressState);
       if (!progress) {
@@ -1623,6 +1630,23 @@ export class CodexAppClient extends EventEmitter {
           pendingApprovalWaitLogged = false;
           lastPendingApprovalCount = pendingApprovalCount;
         }
+        if (terminalRuntimeError) {
+          const result = {
+            turnId,
+            threadId,
+            title: threadSummaryForFallback?.title ?? null,
+            outputText: '',
+            outputArtifacts: [],
+            outputMedia: [],
+            outputState: 'provider_error',
+            previewText: progressState.finalAnswerText,
+            finalSource: 'notification_error',
+            status: null,
+            errorMessage: terminalRuntimeError,
+          };
+          this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+          return result;
+        }
         pollCount += 1;
         let thread = threadSummaryForFallback;
         if (!includeTurnsUnsupported) {
@@ -1683,6 +1707,23 @@ export class CodexAppClient extends EventEmitter {
           turn: summarizeTurnSnapshot(turn),
           progress: summarizeProgressState(progressState),
         });
+        if (terminalRuntimeError) {
+          const result = {
+            turnId,
+            threadId,
+            title: thread?.title ?? null,
+            outputText: '',
+            outputArtifacts: [],
+            outputMedia: [],
+            outputState: 'provider_error',
+            previewText: progressState.finalAnswerText,
+            finalSource: 'notification_error',
+            status: turn?.status ?? null,
+            errorMessage: terminalRuntimeError,
+          };
+          this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+          return result;
+        }
         if (includeTurnsUnsupported) {
           const previewText = progressState.finalAnswerText || progressState.commentaryText;
           const settleAnchor = Math.max(
@@ -3262,6 +3303,38 @@ function isTerminalNotificationForThread(
     return true;
   }
   return false;
+}
+
+function isErrorNotificationForThreadTurn(
+  notification: any,
+  threadId: string,
+  turnId: string,
+): boolean {
+  if (!notification || !isErrorNotificationMethod(notification.method)) {
+    return false;
+  }
+  if (extractThreadIdFromNotification(notification) !== threadId) {
+    return false;
+  }
+  const notificationTurnId = extractNotificationTurnId(notification?.params ?? null);
+  return !notificationTurnId || notificationTurnId === turnId;
+}
+
+function isErrorNotificationMethod(method: unknown): boolean {
+  const normalized = String(method ?? '').replace(/[^a-z]/gi, '').toLowerCase();
+  return normalized === 'error'
+    || normalized === 'streamerror'
+    || normalized.endsWith('error');
+}
+
+function extractNotificationErrorMessage(notification: any): string | null {
+  const params = notification?.params ?? null;
+  const message = extractTextCandidate(params?.error)
+    ?? extractTextCandidate(params?.message)
+    ?? extractTextCandidate(params?.details)
+    ?? extractTextCandidate(params?.event?.error)
+    ?? extractTextCandidate(notification?.error);
+  return typeof message === 'string' && message.trim() ? message.trim() : null;
 }
 
 function computeTerminalSettleMs(timeoutMs) {
