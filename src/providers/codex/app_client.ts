@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { writeSequencedStderrLine } from '../../core/sequenced_stderr.js';
 import { readCodexAccountIdentity } from './auth_state.js';
+import { createCodexCliLaunchSpec } from './cli_command.js';
 import type {
   ProviderAppInfo,
   ProviderApprovalRequest,
@@ -278,6 +279,8 @@ interface ProgressState {
   lastAssistantActivityAt: number;
 }
 
+type CodexAppServerTransport = 'auto' | 'websocket' | 'stdio';
+
 interface CodexAppClientOptions {
   codexCliBin: string;
   codexCliArgs?: string[];
@@ -289,6 +292,7 @@ interface CodexAppClientOptions {
   clientInfo?: CodexClientInfo;
   spawnImpl?: typeof spawn;
   webSocketFactory?: (url: string) => WebSocket;
+  appServerTransport?: CodexAppServerTransport | string | null;
   platform?: NodeJS.Platform;
   logger?: CodexAppLogger;
   turnPollSleep?: (ms: number) => Promise<void>;
@@ -329,6 +333,8 @@ export class CodexAppClient extends EventEmitter {
 
   webSocketFactory: (url: string) => WebSocket;
 
+  appServerTransport: CodexAppServerTransport;
+
   platform: NodeJS.Platform;
 
   logger: CodexAppLogger;
@@ -340,6 +346,10 @@ export class CodexAppClient extends EventEmitter {
   child: ChildProcess | null;
 
   socket: WebSocket | null;
+
+  transportKind: 'websocket' | 'stdio' | null;
+
+  stdioLineBuffer: string;
 
   pending: Map<string, PendingRequest>;
 
@@ -374,6 +384,7 @@ export class CodexAppClient extends EventEmitter {
     },
     spawnImpl = spawn,
     webSocketFactory = (url) => new WebSocket(url),
+    appServerTransport = normalizeCodexAppServerTransport(process.env.CODEX_APP_SERVER_TRANSPORT),
     platform = process.platform,
     logger = createNoopLogger(),
     turnPollSleep = sleep,
@@ -390,6 +401,7 @@ export class CodexAppClient extends EventEmitter {
     this.clientInfo = clientInfo;
     this.spawnImpl = spawnImpl;
     this.webSocketFactory = webSocketFactory;
+    this.appServerTransport = normalizeCodexAppServerTransport(appServerTransport);
     this.platform = platform;
     this.logger = logger;
     this.turnPollSleep = turnPollSleep;
@@ -397,6 +409,8 @@ export class CodexAppClient extends EventEmitter {
 
     this.child = null;
     this.socket = null;
+    this.transportKind = null;
+    this.stdioLineBuffer = '';
     this.pending = new Map();
     this.pendingApprovals = new Map();
     this.approvedExecutions = new Map();
@@ -420,8 +434,18 @@ export class CodexAppClient extends EventEmitter {
     return this.connected;
   }
 
+  isTransportConnected(): boolean {
+    if (!this.connected) {
+      return false;
+    }
+    if (this.transportKind === 'stdio') {
+      return Boolean(this.child?.stdin?.writable);
+    }
+    return Boolean(this.socket && this.socket.readyState === WebSocket.OPEN);
+  }
+
   async start(): Promise<void> {
-    if (this.connected) {
+    if (this.isTransportConnected()) {
       return;
     }
     if (this.startPromise) {
@@ -441,6 +465,8 @@ export class CodexAppClient extends EventEmitter {
     this.connected = false;
     this.socket?.close();
     this.socket = null;
+    this.transportKind = null;
+    this.stdioLineBuffer = '';
     this.childStartError = null;
     this.childStderrTail = [];
     const child = this.child;
@@ -1018,21 +1044,26 @@ export class CodexAppClient extends EventEmitter {
     }
     this.childStartError = null;
     this.childStderrTail = [];
-    this.port = await reservePort();
+    this.stdioLineBuffer = '';
+    const transportKind = this.resolveAppServerTransportKind();
+    this.port = transportKind === 'websocket' ? await reservePort() : null;
     const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
+    const appServerArgs = transportKind === 'websocket'
+      ? [...this.codexCliArgs, 'app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`]
+      : [...this.codexCliArgs, 'app-server', ...featureArgs];
     const launchSpec = createCodexAppServerLaunchSpec({
       command: this.codexCliBin,
-      args: [...this.codexCliArgs, 'app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`],
+      args: appServerArgs,
       platform: this.platform,
     });
     try {
       this.child = launchSpec.args
         ? this.spawnImpl(launchSpec.command, launchSpec.args, {
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: transportKind === 'stdio' ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
           ...launchSpec.options,
         })
         : this.spawnImpl(launchSpec.command, {
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: transportKind === 'stdio' ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
           ...launchSpec.options,
         });
     } catch (error) {
@@ -1046,12 +1077,16 @@ export class CodexAppClient extends EventEmitter {
       command: launchSpec.displayCommand,
       spawnCommand: launchSpec.command,
       spawnArgs: launchSpec.args,
+      transportKind,
       port: this.port,
       codexCliArgs: this.codexCliArgs,
       enabledFeatures: this.enabledFeatures,
       autolaunch: this.autolaunch,
       launchCommand: this.launchCommand,
     });
+    if (transportKind === 'stdio') {
+      this.child.stdout?.on('data', (chunk) => this.handleStdioData(chunk));
+    }
     this.child.stderr?.on('data', (chunk) => {
       const text = String(chunk).trim();
       if (text) {
@@ -1069,9 +1104,37 @@ export class CodexAppClient extends EventEmitter {
     this.child.on('exit', () => {
       this.connected = false;
       this.socket = null;
+      this.transportKind = null;
     });
-    await this.connectWebSocket();
+    if (transportKind === 'stdio') {
+      this.transportKind = 'stdio';
+      this.connected = true;
+    } else {
+      await this.connectWebSocket();
+    }
     await this.initialize();
+  }
+
+  resolveAppServerTransportKind(): 'websocket' | 'stdio' {
+    if (this.appServerTransport === 'stdio') {
+      return 'stdio';
+    }
+    return 'websocket';
+  }
+
+  handleStdioData(chunk: unknown): void {
+    this.stdioLineBuffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk ?? '');
+    for (;;) {
+      const newlineIndex = this.stdioLineBuffer.indexOf('\n');
+      if (newlineIndex < 0) {
+        break;
+      }
+      const line = this.stdioLineBuffer.slice(0, newlineIndex).trim();
+      this.stdioLineBuffer = this.stdioLineBuffer.slice(newlineIndex + 1);
+      if (line) {
+        this.handleMessage(line);
+      }
+    }
   }
 
   async connectWebSocket(): Promise<void> {
@@ -1097,6 +1160,7 @@ export class CodexAppClient extends EventEmitter {
           };
           ws.addEventListener('open', () => {
             this.socket = ws;
+            this.transportKind = 'websocket';
             this.connected = true;
             ws.addEventListener('message', (message) => this.handleMessage(String(message.data)));
             ws.addEventListener('close', () => {
@@ -1139,7 +1203,7 @@ export class CodexAppClient extends EventEmitter {
   }
 
   async request(method: string, params: any, { timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<any> {
-    if (!this.socket || !this.connected) {
+    if (!this.isTransportConnected()) {
       await this.start();
     }
     const id = String(++this.requestId);
@@ -1190,6 +1254,13 @@ export class CodexAppClient extends EventEmitter {
   }
 
   send(payload: any): void {
+    if (this.transportKind === 'stdio') {
+      if (!this.child?.stdin?.writable) {
+        throw new Error('Codex app-server stdio is not open');
+      }
+      this.child.stdin.write(`${JSON.stringify(payload)}\n`);
+      return;
+    }
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       throw new Error('Codex app-server socket is not open');
     }
@@ -1470,8 +1541,9 @@ export class CodexAppClient extends EventEmitter {
     let lastTurnSnapshotKey = null;
     let stableTerminalReadCount = 0;
     let pollCount = 0;
-    let includeTurnsUnsupported = false;
-    let includeTurnsUnsupportedAt = 0;
+    let includeTurnsUnsupported = this.transportKind === 'stdio';
+    let includeTurnsUnsupportedAt = includeTurnsUnsupported ? this.turnPollNow() : 0;
+    let threadSummaryForFallback: ProviderThreadSummary | null = null;
     let pendingApprovalWaitLogged = false;
     let lastPendingApprovalCount = 0;
     const terminalSettleMs = computeTerminalSettleMs(timeoutMs);
@@ -1483,9 +1555,32 @@ export class CodexAppClient extends EventEmitter {
     };
     const itemOutputKinds = new Map();
     let sawTerminalNotification = false;
+    let terminalRuntimeError: string | null = null;
     const onNotification = (notification) => {
       if (isTerminalNotificationForThread(notification, threadId, turnId)) {
         sawTerminalNotification = true;
+      }
+      if (isErrorNotificationForThreadTurn(notification, threadId, turnId)) {
+        const notificationErrorMessage = extractNotificationErrorMessage(notification);
+        if (!notificationErrorMessage) {
+          this.logDebug('turn_wait_unclassified_error_notification', {
+            threadId,
+            turnId,
+            method: notification?.method ?? null,
+          });
+          return;
+        }
+        if (isTransientNotificationErrorMessage(notificationErrorMessage)) {
+          this.logDebug('turn_wait_transient_error_notification', {
+            threadId,
+            turnId,
+            errorMessage: notificationErrorMessage,
+          });
+          return;
+        }
+        terminalRuntimeError = notificationErrorMessage;
+        sawTerminalNotification = true;
+        return;
       }
       const progress = extractProgressUpdate(notification, turnId, itemOutputKinds, progressState);
       if (!progress) {
@@ -1551,51 +1646,68 @@ export class CodexAppClient extends EventEmitter {
           pendingApprovalWaitLogged = false;
           lastPendingApprovalCount = pendingApprovalCount;
         }
+        if (terminalRuntimeError) {
+          const result = {
+            turnId,
+            threadId,
+            title: threadSummaryForFallback?.title ?? null,
+            outputText: '',
+            outputArtifacts: [],
+            outputMedia: [],
+            outputState: 'provider_error',
+            previewText: progressState.finalAnswerText,
+            finalSource: 'notification_error',
+            status: null,
+            errorMessage: terminalRuntimeError,
+          };
+          this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+          return result;
+        }
         pollCount += 1;
-        let thread = null;
-        try {
-          thread = await this.readThread(threadId, !includeTurnsUnsupported);
-        } catch (error) {
-          if (isThreadMaterializationPendingError(error)) {
-            this.logDebug('turn_poll_retry', {
-              threadId,
-              turnId,
-              pollCount,
-              reason: 'thread_materialization_pending',
-            });
-            await this.turnPollSleep(1000);
-            continue;
-          }
-          if (isRequestTimeoutError(error)) {
-            this.logDebug('turn_poll_retry', {
-              threadId,
-              turnId,
-              pollCount,
-              reason: 'thread_read_timeout',
-            });
-            await this.turnPollSleep(1000);
-            continue;
-          }
-          if (isIncludeTurnsUnsupportedError(error)) {
-            includeTurnsUnsupported = true;
-            includeTurnsUnsupportedAt ||= this.turnPollNow();
-            this.logDebug('turn_poll_retry', {
-              threadId,
-              turnId,
-              pollCount,
-              reason: 'thread_read_include_turns_unsupported',
-            });
-            try {
-              thread = await this.readThread(threadId, false);
-            } catch (fallbackError) {
-              if (isThreadMaterializationPendingError(fallbackError) || isRequestTimeoutError(fallbackError)) {
-                await this.turnPollSleep(250);
-                continue;
-              }
-              throw fallbackError;
+        let thread = threadSummaryForFallback;
+        if (!includeTurnsUnsupported) {
+          try {
+            thread = await this.readThread(threadId, true);
+            threadSummaryForFallback = thread;
+          } catch (error) {
+            if (isThreadMaterializationPendingError(error)) {
+              this.logDebug('turn_poll_retry', {
+                threadId,
+                turnId,
+                pollCount,
+                reason: 'thread_materialization_pending',
+              });
+              await this.turnPollSleep(1000);
+              continue;
             }
-          } else {
-            throw error;
+            if (isRequestTimeoutError(error)) {
+              this.logDebug('turn_poll_retry', {
+                threadId,
+                turnId,
+                pollCount,
+                reason: 'thread_read_timeout',
+              });
+              await this.turnPollSleep(1000);
+              continue;
+            }
+            if (isIncludeTurnsUnsupportedError(error)) {
+              includeTurnsUnsupported = true;
+              includeTurnsUnsupportedAt ||= this.turnPollNow();
+              try {
+                thread = await this.readThread(threadId, false);
+                threadSummaryForFallback = thread;
+              } catch {
+                thread = threadSummaryForFallback;
+              }
+              this.logDebug('turn_poll_retry', {
+                threadId,
+                turnId,
+                pollCount,
+                reason: 'thread_read_include_turns_unsupported',
+              });
+            } else {
+              throw error;
+            }
           }
         }
         const turn = includeTurnsUnsupported
@@ -1611,6 +1723,23 @@ export class CodexAppClient extends EventEmitter {
           turn: summarizeTurnSnapshot(turn),
           progress: summarizeProgressState(progressState),
         });
+        if (terminalRuntimeError) {
+          const result = {
+            turnId,
+            threadId,
+            title: thread?.title ?? null,
+            outputText: '',
+            outputArtifacts: [],
+            outputMedia: [],
+            outputState: 'provider_error',
+            previewText: progressState.finalAnswerText,
+            finalSource: 'notification_error',
+            status: turn?.status ?? null,
+            errorMessage: terminalRuntimeError,
+          };
+          this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+          return result;
+        }
         if (includeTurnsUnsupported) {
           const previewText = progressState.finalAnswerText || progressState.commentaryText;
           const settleAnchor = Math.max(
@@ -2338,6 +2467,14 @@ function normalizeStringList(value: unknown): string[] {
     : [];
 }
 
+function normalizeCodexAppServerTransport(value: unknown): CodexAppServerTransport {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'stdio' || normalized === 'websocket') {
+    return normalized;
+  }
+  return 'auto';
+}
+
 function normalizeBoolean(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
@@ -2527,12 +2664,19 @@ function summarizeRpcResult(method: string, result: any) {
 }
 
 function summarizeNotificationMessage(message: any) {
+  const errorMessage = isErrorNotificationMethod(message?.method)
+    ? extractNotificationErrorMessage(message)
+    : null;
   return {
     method: String(message?.method ?? ''),
     id: 'id' in (message ?? {}) ? String(message.id ?? '') : null,
     threadId: extractThreadIdFromNotification(message),
     turnId: extractNotificationTurnId(message?.params ?? null),
     itemId: extractItemId(message?.params ?? null),
+    eventType: typeof message?.params?.event?.type === 'string'
+      ? message.params.event.type
+      : null,
+    errorMessage: truncateDebugText(errorMessage, 160),
     outputKind: typeof message?.params?.item?.output_kind === 'string'
       ? message.params.item.output_kind
       : null,
@@ -3181,11 +3325,68 @@ function isTerminalNotificationForThread(
   if (method === 'turncompleted') {
     return true;
   }
-  if (method === 'itemcompleted') {
-    const notificationTurnId = extractNotificationTurnId(notification?.params ?? null);
-    return !notificationTurnId || notificationTurnId === turnId;
-  }
   return false;
+}
+
+function isErrorNotificationForThreadTurn(
+  notification: any,
+  threadId: string,
+  turnId: string,
+): boolean {
+  if (!notification || !isErrorNotificationMethod(notification.method)) {
+    return false;
+  }
+  if (extractThreadIdFromNotification(notification) !== threadId) {
+    return false;
+  }
+  const notificationTurnId = extractNotificationTurnId(notification?.params ?? null);
+  return !notificationTurnId || notificationTurnId === turnId;
+}
+
+function isErrorNotificationMethod(method: unknown): boolean {
+  const normalized = String(method ?? '').replace(/[^a-z]/gi, '').toLowerCase();
+  return normalized === 'error'
+    || normalized === 'streamerror'
+    || normalized.endsWith('error');
+}
+
+function extractNotificationErrorMessage(notification: any): string | null {
+  const params = notification?.params ?? null;
+  const message = extractTextCandidate(params?.error)
+    ?? extractTextCandidate(params?.message)
+    ?? extractTextCandidate(params?.details)
+    ?? extractTextCandidate(params?.event?.error)
+    ?? extractTextCandidate(params?.event?.message)
+    ?? extractTextCandidate(params?.event?.details)
+    ?? extractTextCandidate(params?.event?.msg)
+    ?? extractTextCandidate(params?.msg?.error)
+    ?? extractTextCandidate(params?.msg?.message)
+    ?? extractTextCandidate(params?.msg?.details)
+    ?? extractTextCandidate(params?.msg)
+    ?? extractTextCandidate(notification?.error);
+  return typeof message === 'string' && message.trim() ? message.trim() : null;
+}
+
+function isTransientNotificationErrorMessage(message: string | null): boolean {
+  if (!message) {
+    return false;
+  }
+  const normalized = message.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const hasAttemptCounter = /\b\d+\s*\/\s*\d+\b/.test(normalized);
+  const looksLikeRetry =
+    /\breconnecting\b/.test(normalized)
+    || /\bretrying\b/.test(normalized)
+    || /\bretry\b/.test(normalized);
+  const looksTerminal =
+    /\b(exhausted|failed|failure|fatal|giving up|unavailable|forbidden|unauthorized)\b/.test(normalized)
+    || /\bhttp\s+\d{3}\b/.test(normalized);
+  if (hasAttemptCounter && looksLikeRetry && !looksTerminal) {
+    return true;
+  }
+  return /\b(stream|connection|socket)\b.*\b(disconnected|closed|reset)\b.*\bretrying\b/.test(normalized);
 }
 
 function computeTerminalSettleMs(timeoutMs) {
@@ -4062,22 +4263,7 @@ function createCodexAppServerLaunchSpec({
   options?: Record<string, unknown>;
   displayCommand: string;
 } {
-  if (platform === 'win32' && /\.(cmd|bat)$/iu.test(command)) {
-    return {
-      command: buildWindowsShellCommandLine([command, ...args]),
-      args: null,
-      options: {
-        shell: true,
-        windowsHide: true,
-      },
-      displayCommand: command,
-    };
-  }
-  return {
-    command,
-    args,
-    displayCommand: command,
-  };
+  return createCodexCliLaunchSpec({ command, args, platform });
 }
 
 function createCodexLaunchError({
@@ -4130,21 +4316,6 @@ function createCodexConnectTimeoutError({
     ? ` Last stderr: ${stderrTail.join(' | ')}`
     : '';
   return new Error(`Timed out connecting to ${url} after launching "${command}".${detail}`);
-}
-
-function buildWindowsShellCommandLine(parts: string[]): string {
-  return parts.map(quoteWindowsShellArgument).join(' ');
-}
-
-function quoteWindowsShellArgument(value: string): string {
-  const normalized = String(value ?? '');
-  if (!normalized) {
-    return '""';
-  }
-  if (!/[\s"]/u.test(normalized)) {
-    return normalized;
-  }
-  return `"${normalized.replace(/"/g, '""')}"`;
 }
 
 async function reservePort(): Promise<number> {

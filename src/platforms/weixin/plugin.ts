@@ -44,6 +44,7 @@ import type {
 
 const TYPING_START = 1;
 const TYPING_STOP = 2;
+const WEIXIN_SEND_MESSAGE_TIMEOUT_MS = 30_000;
 
 interface WeixinScope {
   chatType: 'group' | 'dm';
@@ -480,6 +481,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           text: chunkText,
           contextToken: delivery.payload.msg.context_token ?? null,
           clientId: delivery.payload.msg.client_id,
+          timeoutMs: WEIXIN_SEND_MESSAGE_TIMEOUT_MS,
         }) ?? { ret: -1 });
         debugWeixin('send_text_result', {
           scopeId: externalScopeId,

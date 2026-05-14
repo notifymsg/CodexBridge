@@ -1183,7 +1183,8 @@ export class BridgeCoordinator {
       });
       return explicitPluginIssueResponse;
     }
-    this.activeTurns?.beginScopeTurn(scopeRef);
+    const localActiveTurn = this.activeTurns?.beginScopeTurn(scopeRef) ?? null;
+    let localTurnFinished = false;
     let session = null;
     try {
       const locale = this.resolveScopeLocale(scopeRef, effectiveEvent);
@@ -1240,6 +1241,7 @@ export class BridgeCoordinator {
           errorMessage: result.errorMessage ?? '',
         },
       };
+      localTurnFinished = isTurnResultLocallyFinished(result);
       return response;
     } catch (error) {
       const failure = classifyTurnFailure(error, this.currentI18n);
@@ -1264,9 +1266,13 @@ export class BridgeCoordinator {
           errorMessage: failure.errorMessage ?? '',
         },
       };
+      localTurnFinished = isTurnResultLocallyFinished(failure);
       return response;
     } finally {
-      await this.releaseActiveTurnIfStillRunning(scopeRef);
+      await this.releaseActiveTurnIfStillRunning(scopeRef, {
+        localTurnFinished,
+        expectedActiveTurn: localActiveTurn,
+      });
     }
   }
 
@@ -9050,7 +9056,12 @@ export class BridgeCoordinator {
     if (!normalizedName) {
       return false;
     }
-    const features = await this.listCodexExperimentalFeatures();
+    let features: CodexExperimentalFeatureInfo[];
+    try {
+      features = await this.listCodexExperimentalFeatures();
+    } catch {
+      return false;
+    }
     return features.some((feature) => feature.name.toLowerCase() === normalizedName && feature.enabled);
   }
 
@@ -10847,9 +10858,26 @@ export class BridgeCoordinator {
     return this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
   }
 
-  async releaseActiveTurnIfStillRunning(scopeRef) {
+  async releaseActiveTurnIfStillRunning(scopeRef, { localTurnFinished = false, expectedActiveTurn = null } = {}) {
+    const currentActiveTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    if (expectedActiveTurn && currentActiveTurn !== expectedActiveTurn) {
+      return;
+    }
     const activeTurn = await this.reconcileActiveTurn(scopeRef);
     if (!activeTurn) {
+      return;
+    }
+    if (expectedActiveTurn && activeTurn !== expectedActiveTurn) {
+      return;
+    }
+    if (localTurnFinished && !hasPendingApproval(activeTurn)) {
+      debugCoordinator('active_turn_released_after_local_finish', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        threadId: activeTurn.threadId ?? null,
+        turnId: activeTurn.turnId ?? null,
+      });
+      this.activeTurns?.endScopeTurn(scopeRef);
       return;
     }
     if (activeTurn.turnId || hasPendingApproval(activeTurn)) {
@@ -11221,6 +11249,20 @@ export class BridgeCoordinator {
         }
       }
     }
+    if (
+      active
+      && interruptErrors.length > 0
+      && interruptErrors.every((error) => isInterruptRequestTimeoutError(error))
+    ) {
+      debugCoordinator('active_turn_released_after_interrupt_timeout', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        threadId: active.threadId ?? session.codexThreadId ?? null,
+        turnId: active.turnId ?? null,
+        interruptErrors,
+      });
+      this.activeTurns?.endScopeTurn(scopeRef);
+    }
 
     const settled = waitForSettleMs > 0
       ? await this.waitForThreadToStop(scopeRef, session, waitForSettleMs)
@@ -11373,6 +11415,20 @@ export class BridgeCoordinator {
       result,
       context: turnArtifactContext,
     });
+    if (shouldRecoverFromProviderTurnResult(finalizedResult)) {
+      const errorMessage = finalizedResult.errorMessage || 'Codex turn failed with a recoverable provider error';
+      debugCoordinator('turn_result_recoverable_provider_error', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        bridgeSessionId: session.id,
+        threadId: finalizedResult?.threadId ?? session.codexThreadId,
+        turnId: finalizedResult?.turnId ?? null,
+        outputState: finalizedResult?.outputState ?? null,
+        finalSource: finalizedResult?.finalSource ?? null,
+        errorMessage,
+      });
+      throw new Error(errorMessage);
+    }
     debugCoordinator('turn_result_finalized', {
       platform: scopeRef.platform,
       scopeId: scopeRef.externalScopeId,
@@ -20403,6 +20459,28 @@ function isResumeRetryableError(error) {
 
 function shouldAutoRebindAfterRecoveryFailure(error) {
   return isStaleThreadError(error) || isResumeRetryableError(error);
+}
+
+function shouldRecoverFromProviderTurnResult(result) {
+  if (!result || result.outputState !== 'provider_error') {
+    return false;
+  }
+  const errorMessage = typeof result.errorMessage === 'string' ? result.errorMessage : '';
+  if (!errorMessage.trim()) {
+    return false;
+  }
+  return shouldAutoRebindAfterRecoveryFailure(new Error(errorMessage));
+}
+
+function isTurnResultLocallyFinished(result) {
+  const outputState = String(result?.outputState ?? 'complete').trim().toLowerCase();
+  return outputState !== 'partial';
+}
+
+function isInterruptRequestTimeoutError(errorMessage) {
+  const normalized = String(errorMessage ?? '').trim().toLowerCase();
+  return normalized.includes('timed out waiting for codex json-rpc response to turn/interrupt')
+    || normalized.includes('timeout waiting for codex json-rpc response to turn/interrupt');
 }
 
 function isApprovedExecutionStallError(error) {

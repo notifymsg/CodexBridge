@@ -224,6 +224,36 @@ test('WeixinOfficialTransport.sendMessage and getConfig use Hermes-compatible pa
   assert.equal(configBody.context_token, 'ctx-1');
 });
 
+test('WeixinOfficialTransport.sendMessage forwards explicit timeoutMs to the request layer', async () => {
+  const { fetchImpl } = createFetchMock([{ body: { ret: 0 } }]);
+  const observedTimeouts: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = (handler: any, timeout?: any, ...args: any[]) => {
+    observedTimeouts.push(Number(timeout));
+    return originalSetTimeout(handler, timeout, ...args);
+  };
+
+  try {
+    const transport = createWeixinOfficialTransport({
+      baseUrl: 'https://ilink.example.com',
+      token: 'bot-token',
+      fetchImpl,
+    });
+
+    await transport.sendMessage({
+      toUserId: 'wxid_sender',
+      text: 'hello',
+      contextToken: 'ctx-1',
+      clientId: 'client-1',
+      timeoutMs: 30_000,
+    });
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  assert.ok(observedTimeouts.includes(30_000));
+});
+
 test('WeixinOfficialTransport.sendMediaFile transcodes JPEG inputs before upload and sends the image item downstream', async (t) => {
   if (!hasFfmpeg()) {
     t.skip('ffmpeg/ffprobe not available');
